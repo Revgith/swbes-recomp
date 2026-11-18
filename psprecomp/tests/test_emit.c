@@ -1,4 +1,4 @@
-/* Emitter tests — synthetic code only, no game data.
+/* Emitter tests â€” synthetic code only, no game data.
  *
  * The function under test is eight instructions of hand-assembled MIPS chosen
  * to exercise the parts of emission that are actually hard: a conditional
@@ -7,7 +7,7 @@
  *
  * The assertions are about the *shape* of the generated C, because that shape
  * is the contract. In particular the branch must read its condition into a
- * temporary before the delay slot runs — if that ever regresses, a delay slot
+ * temporary before the delay slot runs â€” if that ever regresses, a delay slot
  * that writes a condition register silently changes which way the branch goes,
  * once in a thousand iterations, in a game nobody can debug.
  */
@@ -340,12 +340,20 @@ static void check_slot_of_another_body(void) {
         char *src = emit_case(&an, "t_slot_call");
         CHECK(src != NULL, "call case: generated .c is readable");
         if (src) {
-            expect_contains(src, "/* falls into 0x08804004, owned by another function */",
-                            "after the call, control continues at the delay slot");
-            expect_contains(src, "psp_func_08804004();",
-                            "and reaches it as a function");
+            /* The hardware runs the slot before the callee, then returns past
+             * it. This used to continue AT the slot after the call: the callee
+             * ran without it (Battlefront 0x30CDDC, a list walk handed a count
+             * for an end pointer), and the slot then ran late. */
+            const char *body = strstr(src, "psp_body_08804000(uint32_t");
+            const char *slot = body ? strstr(body, "r_v0 = r_zero + 76;") : NULL;
+            const char *call = body ? strstr(body, "PSP_CALL_BEGIN(0x08804008u);") : NULL;
+            const char *ret = body ? strstr(body, "psp_at_08804008();") : NULL;
+            CHECK(slot && call && slot < call, "the delay slot runs before the call");
+            CHECK(call && ret && call < ret, "after the call, control continues past the slot");
+            CHECK(!strstr(src, "/* falls into 0x08804004, owned by another function */"),
+                  "the slot is not run a second time after the call");
             int n = count_of(src, "r_v0 = r_zero + 76;");
-            CHECK(n == 1, "the delay slot is still emitted exactly once, got %d", n);
+            CHECK(n == 2, "one copy before the call, one in the body that owns it, got %d", n);
             free(src);
         }
     }
@@ -625,6 +633,40 @@ static void expect_absent(const char *src, const char *needle, const char *why) 
         printf("FAIL %s\n  must not be emitted here: %s\n", why, needle);
         failures++;
     }
+}
+
+/* A `jal` whose delay slot is another function's entry. The call has to run a
+ * copy of the slot first -- the hardware always does -- and then carry on at
+ * the return site, not fall into the slot a second time.
+ *
+ *   08804000  jal  0x08804010               A
+ *   08804004  addu $a1,$a0,$a1              delay slot, and entry B
+ *   08804008  jr   $ra                      return site, in B
+ *   0880400C  nop
+ *   08804010  jr   $ra                      C, the callee
+ *   08804014  nop
+ *
+ * Found in Battlefront's conquest update (0x30CDDC): without the slot the
+ * callee got a count where it expected an end pointer and walked nothing. */
+static const uint32_t CALL_SLOT_CODE[] = {
+    0x0E201004u, 0x00852821u, 0x03E00008u, 0x00000000u,
+    0x03E00008u, 0x00000000u,
+};
+
+static void check_call_runs_foreign_slot(void) {
+    uint32_t seeds[3] = { BASE, BASE + 4u, BASE + 0x10u };
+    int n = 0;
+    char *src = emit_synthetic("t_callslot", CALL_SLOT_CODE, 6, seeds, 3, &n);
+    CHECK(n == 3, "the call-slot block discovers three entries, got %d", n);
+    if (!src) return;
+    const char *body = strstr(src, "psp_body_08804000(uint32_t");
+    const char *slot = body ? strstr(body, "r_a1 = r_a0 + r_a1;") : NULL;
+    const char *call = body ? strstr(body, "PSP_CALL_BEGIN(0x08804008u);") : NULL;
+    const char *ret = body ? strstr(body, "psp_at_08804008();") : NULL;
+    CHECK(slot && call && slot < call, "a foreign delay slot runs before the call");
+    CHECK(call && ret && call < ret, "the call carries on at its return site");
+    expect_contains(src, "void psp_at_08804008(void)", "the return site is reachable by name");
+    free(src);
 }
 
 static void check_terminal_transfer_stays_tail(void) {
@@ -1113,6 +1155,7 @@ int main(void) {
     check_slot_of_another_body();
     check_taken_path_runs_the_slot();
     check_terminal_transfer_stays_tail();
+    check_call_runs_foreign_slot();
     check_indirect_target_before_slot();
     check_get_pc_is_not_a_call();
     check_jr_ra_continuation();

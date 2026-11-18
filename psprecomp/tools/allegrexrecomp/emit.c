@@ -748,6 +748,12 @@ static void mark_labels(ectx *c, const a_func *fn) {
          * back to it has somewhere to land through dispatch; see jr $ra. */
         if (in.is_call && !in.is_get_pc && owned_by(an, a + 8, owner))
             c->is_label[widx(an, a + 8)] = 1;
+        /* The same when the delay slot belongs to another body: the call is
+         * emitted with a copy of the slot and then continues at a + 8, which
+         * has to be reachable by name in whichever body owns it. */
+        if (in.is_call && !in.is_get_pc && in.has_delay_slot && !owned_by(an, a + 4, owner) &&
+            a + 8 < an->base + an->size && an->owner[widx(an, a + 8)] != A_NO_OWNER)
+            c->is_label[widx(an, a + 8)] = 1;
     }
 
     /* A delay slot can also be somebody's branch target. Arriving through the
@@ -1066,7 +1072,12 @@ static void emit_function(ectx *c, const a_func *fn) {
              * may write that register -- `jalr $t5` / `addiu $t5,$t5,8` calls
              * the OLD $t5. Capture it first, as a branch captures `_c`. */
             if (in.is_indirect) fprintf(f, "    { uint32_t _t = %s;\n", RN[in.rs]);
-            if (have_slot) { comment(c, &slot); emit_simple(c, &slot, "    "); }
+            /* A slot another body owns runs too, a copy before the call (as for a
+             * branch, see taken_slot). Without it, Battlefront's 0x30CDDC `jal
+             * 0x3E34D4` lost its slot `addu $a1,$a0,$a1` at 0x30CDE0 (an entry of
+             * its own): the callee got a count for an end pointer, walked
+             * nothing, and the conquest map never updated past its first phase. */
+            if (have_slot || taken_slot) { comment(c, &slot); emit_simple(c, &slot, "    "); }
             /* Set $ra.
              *
              * Recompiled calls are C calls and `jr $ra` is emitted as `return`,
@@ -1095,7 +1106,21 @@ static void emit_function(ectx *c, const a_func *fn) {
             fprintf(f, "    PSP_CALL_END(0x%08Xu);\n", link ? a + 8 : 0u);
             if (in.is_indirect) fprintf(f, "    }\n");
             if (have_slot && c->is_label[widx(an, a + 4)]) emit_slot_alias(c, a, &slot, 1);
-            if (have_slot) a += 4;               /* see the branch case above */
+            /* Consumed either way: the call returns to a + 8, and a foreign slot
+             * must not run a second time by falling into its owner. */
+            if (have_slot || taken_slot) a += 4;
+            if (taken_slot && (a + 4 >= fn->end || !owned_by(an, a + 4, owner))) {
+                fprintf(f, "    /* returns to 0x%08X, past a slot another function owns */\n", a + 4);
+                fprintf(f, "    PSP_SP_LEAVE(0x%08Xu);\n", a + 4);
+                if (!is_function(an, a + 4) && a + 4 < an->base + an->size && c->is_label[widx(an, a + 4)] &&
+                    !c->is_slot[widx(an, a + 4)] && an->owner[widx(an, a + 4)] != A_NO_OWNER)
+                    fprintf(f, "    psp_at_%08X();\n", a + 4);
+                else
+                    emit_static_call_tail(c, a + 4);
+                fprintf(f, "    return;\n");
+                last_terminal = 1;
+                continue;
+            }
             continue;
         }
 

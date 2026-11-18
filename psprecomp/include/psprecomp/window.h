@@ -39,6 +39,7 @@ void psp_keys_fly(void);     /* call each frame while flying: WASD leave the sti
 void psp_keys_foot(void);    /* call each frame on foot: WASD leave the stick (the game layer reads them) */
 void psp_mouse_take(long *dx, long *dy);
 void psp_mouse_inject(long dx, long dy);   /* test/automation feed */
+void psp_ui_cursor_inject(int x, int y, int click);   /* test/automation: menu cursor at a PSP pixel */
 
 /* PC settings: edited in the window's overlay menu (Esc or F1) and kept in
  * settings.ini in the working directory. The game layer reads them each

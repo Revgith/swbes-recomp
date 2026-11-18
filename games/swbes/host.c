@@ -252,7 +252,7 @@ static void binds_menu(void) {
 static const unsigned g_pad_def[B_COUNT] = {   /* defaults; g_pad_of has them as bound */
     [B_JUMP] = PSP_PAD_A, [B_SPRINT] = PSP_PAD_LS, [B_CROUCH] = PSP_PAD_B, [B_EQUIP] = PSP_PAD_UP,
     [B_THROW] = PSP_PAD_LB, [B_USE] = PSP_PAD_X, [B_CYCLE2] = PSP_PAD_RB, [B_SEAT] = PSP_PAD_DOWN,
-    [B_TARGET] = PSP_PAD_RIGHT, [B_STUNT] = PSP_PAD_RS, [B_AUTOPILOT] = PSP_PAD_LEFT,
+    [B_TARGET] = PSP_PAD_RIGHT, [B_STUNT] = PSP_PAD_RS, [B_AUTOPILOT] = PSP_PAD_LEFT, [B_WACTION] = PSP_PAD_LEFT,
     [B_HERO_YES] = PSP_PAD_LEFT, [B_HERO_NO] = PSP_PAD_RIGHT,
     [B_FIRE] = PSP_PAD_RT, [B_AIM] = PSP_PAD_LT, [B_CYCLE1] = PSP_PAD_Y,
     [B_PAUSE] = PSP_PAD_START, [B_SELECT] = PSP_PAD_BACK, [B_CONFIRM] = PSP_PAD_A, [B_CANCEL] = PSP_PAD_B,
@@ -458,6 +458,7 @@ static void ctl_get(uint32_t addr) { ctl_get2(addr);   /* SWBES_CHLOG: each chan
         for (i = 0; i < 32 && ms[i] && ms[i] != m; i++) {}
         if (i < 32) { ms[i] = m; const float v = psp_read_f32(psp_read32(m + 16) + 4 * ch); const int on = v != 0.0f;
             if (on != (int)(nz[i] >> ch & 1)) { nz[i] ^= 1ull << ch; fprintf(stderr, "ch %08X %u %s %.2f ra %08X f%ld\n", m, ch, on ? "on" : "off", v, psp_read32(psp_cpu.r[29] + 8), psp_game_frames); } } } }
+static long g_seat_any = -100;   /* last frame a turret or walker updated, menu or not */
 static void ctl_get2(uint32_t addr) { (void)addr;
     const uint32_t m = psp_cpu.r[4], ch = psp_cpu.r[5];
     if (getenv("SWBES_MAPDUMP")) map_dump(m, ch, psp_read32(psp_cpu.r[29] + 8));
@@ -496,6 +497,7 @@ static void ctl_get2(uint32_t addr) { (void)addr;
         psp_write_f32(psp_read32(m + 16) + 4 * ch, 1.0f); if (getenv("SWBES_VEHDBG")) fprintf(stderr, "upgrade offer: %s\n", ch == 3 ? "accept" : "decline"); }
     /* Turret (0x2472B0) and walker (0x2507A0) updates: same actions, different channels. */
     const int tur_upd = caller >= 0x00247200u && caller < 0x00247900u && !g_in_ui, walk = caller >= 0x00250800u && caller < 0x00250B00u && !g_in_ui;
+    if ((caller >= 0x00247200u && caller < 0x00247900u) || (caller >= 0x00250800u && caller < 0x00250B00u)) g_seat_any = psp_game_frames;
     if (tur_upd || walk) {
         tur_frame = g_seat_frame = psp_game_frames;
         static const int T[2][8] = { { 7, 8, 9, 11, 12, 6, 15, 16 }, { 3, 4, 10, 6, 7, 5, -1, -1 } };   /* get out, seat, target, fire, secondary, hold, prev, next */
@@ -1766,7 +1768,7 @@ static void menu_mouse(void) {
     if (f == last) return;
     last = f;
     float mx, my; const int in = psp_ui_cursor(&mx, &my);
-    uint32_t hit = 0, hit_pg = 0, back = 0, lst = 0, lst_pg = 0, prompt = 0; int ui = 0, tut = 0, ctrl = 0, lst_row = -1; float prompt_x0 = 0.0f;
+    uint32_t hit = 0, hit_pg = 0, back = 0, lst = 0, lst_pg = 0, prompt = 0, dot = 0, dot_pg = 0; int ui = 0, tut = 0, ctrl = 0, lst_row = -1; float prompt_x0 = 0.0f;
     /* Buttons the game refuses focus to (enemy or empty spawn points on the
      * spawn map): it snaps focus back to its default, so hovering across one
      * jumped the selection to the first command post. Remember them per page. */
@@ -1837,7 +1839,8 @@ static void menu_mouse(void) {
                     { 0x2CA28F67u, 0 }, { 0xDB4653CDu, 0 },   /* "Scroll list", "Select Spawn Point": the d-pad, nothing to click */
                 };
                 const uint32_t txt = psp_read32(w + 0x34); uint32_t btn = 0; int known = 0;
-                if (txt == 0x1594B8A3u) ui = tut = 1;   /* the popup pauses play: Enter must be Cross, not Start */
+                ui = 1;   /* a prompt bar alone (the conquest map) is still a menu */
+                if (txt == 0x1594B8A3u) tut = 1;   /* the popup pauses play: Enter must be Cross, not Start */
                 for (size_t q = 0; q < sizeof P / sizeof P[0]; q++) if (P[q].txt == txt) { btn = P[q].btn; known = 1; }
                 const float x0 = psp_read_f32(w + 0x60), y0 = psp_read_f32(w + 0x64), x1 = psp_read_f32(w + 0x68), y1 = psp_read_f32(w + 0x6C);
                 if (in && x1 > x0 && mx >= x0 && mx < x1 && my >= y0 && my < y1) {
@@ -1860,6 +1863,13 @@ static void menu_mouse(void) {
             /* The loadout screen's class list is nav 9 too, but focusable
              * (+0xCC bit 0x100); the spawn map's panels are not. */
             if (psp_read32(w + 0x98) == 9 && !(psp_read32(w + 0xCC) & 0x100)) continue;
+            /* The campaign timeline's mission dots (by id). Focusing one directly
+             * picked an empty mission, so the mouse walks the d-pad to it. */
+            const uint32_t wid = psp_read32(w + 0x90);
+            if ((wid - 0x9EC04F7Du < 10u || wid == 0x3949A072u || wid == 0x3949A073u || wid == 0x382CCFB8u || wid == 0x8135382Fu)) { ui = 1;
+                const float x0 = psp_read_f32(w + 0x60), y0 = psp_read_f32(w + 0x64), x1 = psp_read_f32(w + 0x68), y1 = psp_read_f32(w + 0x6C);
+                if (in && mx >= x0 - 4 && mx < x1 + 4 && my >= y0 - 4 && my < y1 + 4) { dot = w; dot_pg = p; }
+                continue; }
             /* +0x4C bit 0x100: disabled. The spawn map keeps 8 command-post
              * buttons; the unused ones stay "shown" but carry this bit, and two
              * of them sit over the real posts, so hovering a post focused a
@@ -1871,6 +1881,9 @@ static void menu_mouse(void) {
             if (!bad && in && mx >= x0 && mx < x1 && my >= y0 && my < y1) { hit = w; hit_pg = p; }
         }
     }
+    int bare = 0;   /* no match running and no menu page (the conquest map): a click is Cross */
+    if (ui && g_player_soldier && f - g_soldier_frame > 120) g_player_soldier = 0;   /* a menu after the battle: its soldier no longer updates */
+    if (!ui && !g_player_soldier && f - g_soldier_frame > 30 && f - g_fly_frame > 30 && f - g_seat_any > 30) ui = bare = 1;
     psp_ui_set(ui); g_in_ui = ui; g_tut_popup = tut; g_ctrl_page = ctrl;
     { static long dchk; if (f - dchk > 30) { dchk = f; FILE *df = fopen("widgets.cmd", "rb");   /* debug: dump the live pages' widgets */
         if (df) { fclose(df); remove("widgets.cmd");
@@ -1893,10 +1906,14 @@ static void menu_mouse(void) {
     {   /* the icon sheet's caps show bound keys (psp_icon_key): redecode when one is rebound */
         char now[1024]; sheet_keys(now, sizeof now);
         if (g_sheet_keys[0] && strcmp(now, g_sheet_keys)) { psp_tex_refresh(); strcpy(g_sheet_keys, now); } }
+    { FILE *ef = fopen("ev.cmd", "rb"); if (ef) { unsigned a[5] = {0}; if (fscanf(ef, "%x %x %x %x %x", &a[0], &a[1], &a[2], &a[3], &a[4]) >= 3) gui_post5(a[0], a[1], a[2], a[3], a[4]); fclose(ef); remove("ev.cmd"); } }   /* debug: post a GUI event */
     { FILE *af = fopen("act.cmd", "rb"); if (af) { unsigned id; if (fscanf(af, "%x", &id) == 1) gui_activate(id); fclose(af); remove("act.cmd"); } }   /* debug: activate button id */
     int clicks, rclicks, wheel, moved; psp_ui_take(&clicks, &rclicks, &wheel, &moved);
     if (!ui) { if (wheel) { if (aim_held()) g_zoom_wheel = wheel > 0 ? 1 : -1; else if (g_bind[B_CYCLE1].vk == VK_WHEEL) g_play_wheel = 1; } return; }   /* RMB held: the wheel steps the scope */
     if (getenv("SWBES_HITLOG") && (moved || clicks)) fprintf(stderr, "hit %08X pg %08X lst %08X pg %08X modal %08X\n", hit ? psp_read32(hit + 0x90) : 0, hit_pg, lst ? psp_read32(lst + 0x90) : 0, lst_pg, modal);
+    {   /* the campaign era arrows: focusing one empties the mission panel; a click steps the d-pad to the previous / next mission */
+        const uint32_t hid = hit ? psp_read32(hit + 0x90) : 0;
+        if (hid == 0xA79AB4E7u || hid == 0xA79AB4E8u) { if (clicks) psp_ctrl_pulse(hid == 0xA79AB4E7u ? 0x80u : 0x20u, 0, 3); hit = 0; clicks = 0; } }
     if (hit && (moved || clicks)) {
         const uint32_t id = psp_read32(hit + 0x90), cur = psp_read32(hit_pg + 0xA0);
         if (id != cur) { gui_post(4, id, cur); if (cur) gui_post(5, cur, cur);
@@ -1912,9 +1929,32 @@ static void menu_mouse(void) {
         if (id != cur) { gui_post(4, id, cur); if (cur) gui_post(5, cur, cur); game_call5(0x00096244u, 0, 0, 0, 0, 0); }
         if (lst_row >= 0) psp_write32(lst + 0x200, (uint32_t)lst_row);
     }
+    {   /* walk to the hovered mission dot along its d-pad links (+0xD4 left, +0xD8 right); a click then presses Cross */
+        static uint32_t tgt, tpg; static int go; static long tf;
+        if (dot && (moved || clicks)) { tgt = psp_read32(dot + 0x90); tpg = dot_pg; go |= clicks != 0; }
+        if (tgt) {
+            const uint32_t cur = psp_read32(tpg + 0xA0); int live = 0;
+            for (int i = 0; i < g_pgn; i++) live |= g_pg[i] == tpg && g_pg_frame[i] >= f - 2;
+            if (!live) tgt = go = 0;
+            else if (cur == tgt) { if (go) psp_ctrl_pulse(0x4000u, 2, 3); tgt = go = 0; }
+            else if (f - tf >= 6) {
+                const uint32_t arr = psp_read32(tpg + 0x18), n = psp_read32(tpg + 0x1C) & 0xFFFF; unsigned dir = 0;
+                for (int side = 0; side < 2 && !dir; side++) {
+                    uint32_t id = cur;
+                    for (int s = 0; s < 32 && id && !dir; s++) { uint32_t w = 0;
+                        for (uint32_t k = 0; k < n && k < 256 && !w; k++) { const uint32_t c = psp_read32(arr + 4 * k); if (c && psp_read32(c + 0x90) == id) w = c; }
+                        if (!w) break;
+                        id = psp_read32(w + (side ? 0xD4 : 0xD8));
+                        if (id == tgt) dir = side ? 0x80u : 0x20u; } }
+                if (dir) { psp_ctrl_pulse(dir, 0, 3); tf = f; } else tgt = go = 0;
+            }
+        }
+    }
+    if (dot) clicks = 0;   /* handled above */
     if (prompt && clicks && !hit && !lst) psp_ctrl_pulse(prompt, 0, 4);   /* clicked a button prompt */
     else if (lst && clicks && lst_row >= 0) psp_ctrl_pulse(0x4000u, 1, 2);   /* Cross on the hovered row */
     else if (hit && clicks) gui_activate(psp_read32(hit + 0x90));
+    else if (bare && clicks) psp_ctrl_pulse(0x4000u, 0, 4);
     else if (rclicks) { if (back) gui_activate(back); else psp_ctrl_pulse(0x2000, 0, 4); }   /* no back button: press Circle */
     else if (wheel)    psp_ctrl_pulse(wheel > 0 ? 0x10 : 0x40, 0, 3);   /* d-pad up / down */
 }
@@ -2128,6 +2168,8 @@ int main(int argc, char **argv) {
               fprintf(stderr, "stick %d %d at %llu ms\n", x, y, (unsigned long long)GetTickCount64()); } fclose(sf); remove("stick.cmd"); } }
         { FILE *mf = ch ? fopen("mouse.cmd", "rb") : NULL;    /* "dx dy": inject mouse movement (testing) */
           if (mf) { long dx, dy; if (fscanf(mf, "%ld %ld", &dx, &dy) == 2) psp_mouse_inject(dx, dy); fclose(mf); remove("mouse.cmd"); } }
+        { FILE *cf = ch ? fopen("cursor.cmd", "rb") : NULL;   /* "x y [click]": menu cursor at a PSP pixel (testing) */
+          if (cf) { int x, y, c = 0; if (fscanf(cf, "%d %d %d", &x, &y, &c) >= 2) psp_ui_cursor_inject(x, y, c); fclose(cf); remove("cursor.cmd"); } }
         { FILE *pf = ch ? fopen("peek.cmd", "rb") : NULL;     /* hex addresses -> peek.txt */
           if (pf) { char ln[64]; FILE *o = fopen("peek_tmp.txt", "wb");
               while (fgets(ln, sizeof ln, pf)) { uint32_t a3 = (uint32_t)strtoul(ln, NULL, 16);

@@ -302,7 +302,7 @@ default.
 | RS / R3 | | | stunt (+ stick x: barrel roll) |
 | D-pad up | change equipment | | |
 | D-pad down | change seat | change seat | change seat |
-| D-pad left | accept hero | | autopilot |
+| D-pad left | reload; accept hero | | autopilot |
 | D-pad right | decline hero | | cycle target |
 | Start / Options | pause | pause | pause |
 | Back + Start | PC settings (d-pad / stick, A select, B close) | | |

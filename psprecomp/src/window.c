@@ -619,6 +619,8 @@ int  psp_mouse_left(void) { return (g_mcap && g_mlb) || g_fake[VK_LBUTTON]; }   
 int  psp_mouse_right(void) { return (g_mcap && g_mrb) || g_fake[VK_RBUTTON]; }   /* key.cmd "2 1" holds it */
 void psp_mouse_take(long *dx, long *dy) { *dx = InterlockedExchange(&g_mdx, 0); *dy = InterlockedExchange(&g_mdy, 0); }
 void psp_mouse_inject(long dx, long dy) { InterlockedExchangeAdd(&g_mdx, dx); InterlockedExchangeAdd(&g_mdy, dy); }
+/* test/automation: put the menu cursor at PSP pixel (x, y), optionally with a click */
+void psp_ui_cursor_inject(int x, int y, int click) { g_cx = x * 16; g_cy = y * 16; InterlockedExchange(&g_moved, 1); if (click) InterlockedIncrement(&g_clicks); }
 
 static volatile LONG g_kicked;
 /* Called by the display code when it latches a new frame: the window paints
