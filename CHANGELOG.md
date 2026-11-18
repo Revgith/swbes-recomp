@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.1
+
+- Campaign tutorial: Enter continues popups, E takes weapons, and weapon swaps are noticed.
+- Tutorial and hint prompts show the right PC keys (throttle, boost, grenades, block, autopilot, targeting and more).
+- R reloads on foot (new default for `weapon_action`).
+- Small walker: up/down aim is no longer inverted, and is faster.
+
 ## 0.1.0
 
 First release.

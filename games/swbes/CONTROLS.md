@@ -37,9 +37,9 @@ Dump a live mapper: `status.txt` has `hum_map` / `flyer_map`, then
 | 20 | sprint | L hold | `sprint` Shift |
 | 21 | cycle primary weapon | right tap | wheel, `weapon1`/`weapon2` |
 | 22 | cycle secondary weapon | left tap | `cycle_secondary` X, `weapon3`-`5` |
-| 23 | use / enter vehicle / take weapon | up tap | `use` E (tap) |
-| 24 | change equipment (loadout at a command post) | up tap | `equipment` C |
-| 27 | weapon action on the primary weapon (0x2CE118, likely reload / melee); blasters here overheat instead | - | unbound |
+| 23 | use / enter vehicle | up tap | `use` E (tap) |
+| 24 | change equipment (loadout at a command post); take weapon | up tap | `equipment` C, and `use` E |
+| 27 | weapon action on the primary weapon (0x2CE118, reload); blasters here overheat instead | - | `weapon_action` R |
 | 29 | scope one level out (unzooms from level 0); only while zoomed | - | RMB + wheel down (never past level 0) |
 | 28 | melee block | up hold | `use` E held |
 
@@ -172,10 +172,12 @@ vehicle 11, turret 11 and walker 6. Anywhere else (other seats) host.c's `fire_r
 window to pass the PSP's R instead (`psp_fire_r`), from the same bind. Before,
 LMB was hard-wired to R, so rebinding fire only moved it in ships.
 
+`weapon_action` (27, reload) is R by default, one read per press.
+
 ## Optional binds (default None)
 
 `recenter_camera` (soldier 18, held), `target_search` (19, one read per
-press), `weapon_action` (27, one read per press), `sprint_toggle` (20: a press starts
+press), `sprint_toggle` (20: a press starts
 sprinting until you stop moving, press it again, or hold `sprint`).
 `prev_weapon` (turret 15), `target_hold` (turret 6, walker 5; `aim` too). `cycle_secondary` (22) is one read per press, as the PSP's left tap. Any [keys] / [pad] value
 `None` leaves an action unbound.
@@ -219,7 +221,7 @@ Default keys resets them all. Esc itself can't be captured (it cancels), so
 |---|---|
 | Moving | `forward` W, `back` S, `left` A, `right` D, `jump` Space, `sprint` Shift, `crouch` Ctrl |
 | Weapons | `fire` LMB, `aim` RMB, `next_weapon` Wheel, `secondary_fire` G, `cycle_secondary` X, `weapon1`-`5` 1-5 |
-| Actions | `use` E, `equipment` C, `change_seat` V, `cycle_target` T, `stunt` Q, `autopilot` R, `hero_accept` Y, `hero_decline` N |
+| Actions | `use` E, `equipment` C, `change_seat` V, `cycle_target` T, `stunt` Q, `autopilot` R (starfighter), `weapon_action` R (reload, on foot), `hero_accept` Y, `hero_decline` N |
 | Menus | `pause` P, `select` Tab, `menu_confirm` Enter, `menu_back` Esc, `menu_tab_left` Q, `menu_tab_right` E, `menu_option_1` R (Square), `menu_option_2` F (Triangle), `menu_up` / `down` / `left` / `right` arrows |
 
 Key names: a letter or digit, Space, Shift, Ctrl, Alt, Tab, Enter, Esc, Bksp,

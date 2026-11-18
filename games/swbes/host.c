@@ -145,7 +145,7 @@ static int board(uint32_t id) {
 /* SWBES_QM_BOARD=<hex vehicle id, 1 for any flyer, "tank" or "turret">: board it a second after
  * spawning. Noticed in the soldier's per-frame update, done from con_run. */
 static uint32_t g_gnd_map;
-uint32_t g_hum_map; static long g_force_ch = -1, g_force_until, g_use_until = -1; static int g_block, g_use_pend; static long g_fly_pend_ch = -1;
+uint32_t g_hum_map; static long g_force_ch = -1, g_force_until, g_use_until = -1; static int g_block, g_use_pend; static long g_use_frame = -1; static long g_fly_pend_ch = -1;
 /* PC key binds, one per game action, read from the [keys] section of
  * settings.ini (missing entries are written back with their default, so the
  * file always lists every bind). Values are key names: a letter or digit,
@@ -163,7 +163,7 @@ static struct { const char *id, *def; int vk; char name[16]; } g_bind[B_COUNT] =
     { "weapon1", "1" }, { "weapon2", "2" }, { "weapon3", "3" }, { "weapon4", "4" }, { "weapon5", "5" },
     { "hero_accept", "Y" }, { "hero_decline", "N" },
     { "forward", "W" }, { "back", "S" }, { "left", "A" }, { "right", "D" }, { "fire", "LMB" }, { "aim", "RMB" }, { "next_weapon", "Wheel" },
-    { "recenter_camera", "None" }, { "target_search", "None" }, { "weapon_action", "None" }, { "sprint_toggle", "None" }, { "prev_weapon", "None" }, { "target_hold", "None" },
+    { "recenter_camera", "None" }, { "target_search", "None" }, { "weapon_action", "R" }, { "sprint_toggle", "None" }, { "prev_weapon", "None" }, { "target_hold", "None" },
     { "pause", "P" }, { "select", "Tab" }, { "menu_confirm", "Enter" }, { "menu_back", "Esc" }, { "menu_tab_left", "Q" }, { "menu_tab_right", "E" },
     { "menu_option_1", "R" }, { "menu_option_2", "F" }, { "menu_up", "Up" }, { "menu_down", "Down" }, { "menu_left", "Left" }, { "menu_right", "Right" },
 };
@@ -219,7 +219,8 @@ static void binds_load(void) {
         if (!g_bind[i].vk) { if (v[0]) bind_note("Unknown key \"%s\" for %s: using %s", v, g_bind[i].id, g_bind[i].def);
             g_bind[i].vk = key_parse(g_bind[i].def, g_bind[i].name); } }
     for (int i = 0; i < B_COUNT; i++) for (int j = i + 1; j < B_COUNT; j++)   /* one key, two actions in the same mode (play / menus) */
-        if (g_bind[i].vk && g_bind[i].vk == g_bind[j].vk && (i >= B_PAUSE) == (j >= B_PAUSE))
+        if (g_bind[i].vk && g_bind[i].vk == g_bind[j].vk && (i >= B_PAUSE) == (j >= B_PAUSE)
+            && !(i == B_AUTOPILOT && j == B_WACTION))   /* starfighter only / on foot only */
             bind_note("%s is bound to both %s and %s", g_bind[i].name, g_bind[i].id, g_bind[j].id);
 }
 /* The F1 menu's Controls page: every bind, in an order a player reads. */
@@ -231,7 +232,7 @@ static void binds_menu(void) {
         { B_CYCLE2, "Next secondary" }, { B_W1, "Weapon 1" }, { B_W2, "Weapon 2" }, { B_W3, "Weapon 3" }, { B_W4, "Weapon 4" }, { B_W5, "Weapon 5" },
         { B_USE, "Use / enter / land" }, { B_EQUIP, "Change equipment" }, { B_SEAT, "Change seat" },
         { B_TARGET, "Cycle target" }, { B_STUNT, "Stunt" }, { B_AUTOPILOT, "Autopilot" }, { B_HERO_YES, "Accept hero" }, { B_HERO_NO, "Decline hero" },
-        { B_RECENTER, "Recenter camera (hold)" }, { B_TSEARCH, "Target search" }, { B_THOLD, "Target hold" }, { B_WACTION, "Weapon action" },
+        { B_RECENTER, "Recenter camera (hold)" }, { B_TSEARCH, "Target search" }, { B_THOLD, "Target hold" }, { B_WACTION, "Reload" },
         { B_PAUSE, "Pause", PSP_BIND_MENU }, { B_SELECT, "Select (map)", PSP_BIND_MENU }, { B_CONFIRM, "Menu: confirm", PSP_BIND_MENU | PSP_BIND_SPACE },
         { B_CANCEL, "Menu: back", PSP_BIND_MENU | PSP_BIND_BKSP }, { B_TAB_L, "Menu: tab left", PSP_BIND_MENU }, { B_TAB_R, "Menu: tab right", PSP_BIND_MENU },
         { B_MENU_X, "Menu: option 1", PSP_BIND_MENU }, { B_MENU_Y, "Menu: option 2", PSP_BIND_MENU },
@@ -381,7 +382,7 @@ static void con_run(void) {
         fprintf(stderr, "console: ran %s%s\n", help ? "help " : "", k_console_cmds[i].name);
     }
 }
-static int g_play_wheel, g_throw_ok, g_in_ui;
+static int g_play_wheel, g_wheel21, g_throw_ok, g_in_ui, g_tut_popup;   /* g_tut_popup: a tutorial popup, whose hints name play controls */
 /* entry of the per-frame controller read (0x12C330): while G is held, the read reports the
  * input bound to the game's own throw-secondary action (d-pad Down) */
 /* Jump and sprint, fed straight into the soldier's controls. The player's
@@ -504,7 +505,7 @@ static void ctl_get2(uint32_t addr) { (void)addr;
             const int d = i == 0 ? BIND_DOWN(B_USE) : i == 1 ? BIND_DOWN(B_SEAT) : i == 2 ? BIND_DOWN(B_TARGET) || BIND_DOWN(B_TSEARCH) : i == 3 ? fire_held()
                         : i == 4 ? BIND_DOWN(B_THROW) : i == 5 ? BIND_DOWN(B_THOLD) || aim_held() : i == 6 ? BIND_DOWN(B_PREVW) || BIND_DOWN(B_CYCLE2) : 0;   /* prev: also next secondary (X, pad RB) */
             if (i <= 2 || i == 6) { on = d && !was[walk][i]; was[walk][i] = d; } else on = d;   /* taps: one read per press */
-            if (i == 0 && on) g_use_pend = 0;   /* this press is the exit: on foot it would re-enter */
+            if (i == 0 && on) { g_use_pend = 0; g_use_frame = -1; }   /* this press is the exit: on foot it would re-enter */
             if (i == 7 && g_play_wheel) { g_play_wheel = 0; on = 1; }   /* next weapon: wheel / its key / pad */
             if (i == 3) g_fire_direct = psp_game_frames;
             if (on) { psp_write_f32(psp_read32(m + 16) + 4 * ch, 1.0f); if (getenv("SWBES_VEHDBG") && (i <= 2 || i >= 6)) fprintf(stderr, "%s ch %u (%d)\n", walk ? "walker" : "turret", ch, i); } } }
@@ -518,7 +519,7 @@ static void ctl_get2(uint32_t addr) { (void)addr;
     if (gnd) { g_gnd_map = m; gnd_frame = psp_game_frames; }
     if (gnd && (long)ch == g_force_ch && psp_game_frames <= g_force_until) { psp_write_f32(psp_read32(m + 16) + 4 * ch, g_force_ch == 1 ? -1.0f : 1.0f); return; }   /* debug force */
     if (ch == 7 && m == g_gnd_map && psp_game_frames - gnd_frame <= 2 && !g_in_ui) { static int was; const int u = BIND_DOWN(B_USE);   /* use: get out, on the press */
-        if (u && !was) { g_use_pend = 0;   /* this press is the exit: on foot it would re-enter */
+        if (u && !was) { g_use_pend = 0; g_use_frame = -1;   /* this press is the exit: on foot it would re-enter */
             psp_write_f32(psp_read32(m + 16) + 4 * ch, 1.0f); if (getenv("SWBES_VEHDBG")) fprintf(stderr, "ground vehicle: get out\n"); } was = u; }
     if (ch == 12 && m == g_gnd_map && psp_game_frames - gnd_frame <= 2 && !g_in_ui && BIND_DOWN(B_THROW))
         psp_write_f32(psp_read32(m + 16) + 4 * ch, 1.0f);   /* secondary fire (missiles): the PSP's down hold */
@@ -582,7 +583,7 @@ static void ctl_get2(uint32_t addr) { (void)addr;
         float ps = 0.0f;
         if (!psp_menu_open()) { const psp_pad_t *p = psp_pad(); const float a = ch == 0 ? p->rx : p->ry;
             ps = a * fabsf(a) * 1.5f * (float)psp_settings()->pad_sens / 100.0f * (ch == 1 && psp_settings()->invert ? -1.0f : 1.0f); }
-        if (walk && ch == 1) { walk_pitch = -(v[1] + ps);   /* + on 11 tilts down */   /* W / S, left stick: drive */
+        if (walk && ch == 1) { walk_pitch = (v[1] + ps) * 3.0f;   /* same sign as 1 (a minus inverted it); 11 turns slowly, so 3x */   /* W / S, left stick: drive */
             const float d = (float)(BIND_DOWN(B_FWD) - BIND_DOWN(B_BACK)) + (psp_menu_open() ? 0.0f : psp_pad()->ly);
             if (d != 0.0f) psp_write_f32(psp_read32(m + 16) + 4, d > 1.0f ? 1.0f : d < -1.0f ? -1.0f : d);
             return; }
@@ -598,9 +599,10 @@ static void ctl_get2(uint32_t addr) { (void)addr;
     if (m == g_hum_map && (long)ch == g_force_ch && psp_game_frames <= g_force_until) psp_write_f32(psp_read32(m + 16) + 4 * ch, 1.0f);
     if (getenv("SWBES_HUMDBG") && m == g_hum_map && ch == 7) { static long last; if (psp_game_frames - last > 20 || psp_game_frames <= g_crouch_until || psp_game_frames <= g_force_until + 2) { last = psp_game_frames; fprintf(stderr, "crouch s2 %08X +796 %08X\n", psp_cpu.r[18], psp_read32(psp_cpu.r[18] + 796)); } }
     if (m == g_hum_map && ch == 8 && !g_in_ui && psp_game_frames - tur_frame > 2) g_fire_direct = psp_game_frames;   /* on foot, not in a turret */
-    if (m == g_hum_map && !g_in_ui && ((ch == 23 && g_use_pend && !(g_use_pend = 0)) || (ch == 28 && g_block) || (ch == 9 && BIND_DOWN(B_THROW)) || (ch == 22 && take_press(B_CYCLE2)) || (ch == 24 && BIND_DOWN(B_EQUIP)) || (ch == 8 && fire_held())
+    if (m == g_hum_map && !g_in_ui && ((ch == 23 && ((g_use_pend && !(g_use_pend = 0)) || psp_game_frames == g_use_frame)) || (ch == 21 && g_wheel21 && !(g_wheel21 = 0)) || (ch == 28 && g_block) || (ch == 9 && BIND_DOWN(B_THROW)) || (ch == 22 && take_press(B_CYCLE2)) || (ch == 24 && (BIND_DOWN(B_EQUIP) || psp_game_frames == g_use_frame)) || (ch == 8 && fire_held())
         || (ch == 18 && BIND_DOWN(B_RECENTER)) || (ch == 19 && take_press(B_TSEARCH)) || (ch == 27 && take_press(B_WACTION))))
-        psp_write_f32(psp_read32(m + 16) + 4 * ch, 1.0f);   /* use (hold = melee block) / secondary fire / change equipment (Alternate: d-pad left) */
+        {
+        psp_write_f32(psp_read32(m + 16) + 4 * ch, 1.0f); }   /* use (hold = melee block) / secondary fire / change equipment (Alternate: d-pad left) */
     if ((ch > 5 && ch != 10 && ch != 20 && ch != 7 && ch != 17 && ch != 29 && ch != 30 && ch != 31 && (ch < 11 || ch > 14)) || ch < 4 || g_in_ui || !hum_mapper(m)) return;
     const uint32_t out = psp_read32(m + 16) + 4 * ch;
     /* WASD move the soldier directly, full speed at once,
@@ -1191,6 +1193,7 @@ static const char *psp_icon_key(uint32_t c, int play) {
         { 0xEA08, B_TAB_L, B_STUNT }, { 0xEA0A, B_TAB_L, B_STUNT }, { 0xEA09, B_TAB_R, B_USE }, { 0xEA0B, B_TAB_R, B_USE },   /* L, R */
         { 0xEA10, B_PAUSE, B_PAUSE }, { 0xEA11, B_SELECT, B_SELECT },   /* Start, Select */
     };
+    if (play && (c == 0xEA00 || c == 0xEA01 || c == 0xEA02 || c == 0xEA03 || c == 0xEA12 || c == 0xEA13)) return "A / D";   /* the stick, pulled left / right in hints: steer keys */
     for (size_t i = 0; i < sizeof T / sizeof T[0]; i++) if (T[i].code == c) return g_bind[play ? T[i].play : T[i].ui].name;
     return NULL;
 }
@@ -1235,7 +1238,7 @@ static void glyph_hash_hook(uint32_t addr) { (void)addr;   /* 0x45C60 entry, a0 
         if (i == nm && learn && nm < 32) { M[nm].h = h; M[nm].code = learn; nm++; }
         if (i == nm || getenv("SWBES_PSP_PROMPTS")) return;
         if (psp_pad_last()) { g = psp_icon_pad_cell(M[i].code); if (g < 0) return; }
-        else { const char *k = psp_icon_key(M[i].code, !g_in_ui); const int kc = k ? kc_index(k, strlen(k)) : -1;
+        else { const char *k = psp_icon_key(M[i].code, !g_in_ui || g_tut_popup); const int kc = k ? kc_index(k, strlen(k)) : -1;
             if (kc < 0) return;   /* no live cap (arrows): the icon sheet's own picture stays */
             g = PG_N + kc; }
         /* drawn at the size of the PSP icon it replaces */
@@ -1257,7 +1260,7 @@ static void glyph_hash_hook(uint32_t addr) { (void)addr;   /* 0x45C60 entry, a0 
     psp_write_f32(s + 16, x / PG_COLS); psp_write_f32(s + 20, y / ROWS); psp_write_f32(s + 24, (x + wc) / PG_COLS); psp_write_f32(s + 28, (y + 1) / ROWS);
     psp_cpu.r[4] = PG_HASH + (uint32_t)g;
 }
-static int g_text_equip;   /* the string being rewritten mentions equipment */
+static int g_text_equip, g_text_thr;   /* g_text_thr: 1 accelerate, -1 decelerate (the ship hints name the throttle by the take-off code) */   /* the string being rewritten mentions equipment */
 static int g_text_hero;    /* ... is the hero offer ("<left> Accept or Decline <right>") */
 /* What to call an action's control in on-screen text: its pad button, in the
  * prompt style's own names, while the pad is the last thing used (or a pad
@@ -1288,10 +1291,19 @@ static const char *pc_key_name(uint32_t c) {
     switch (c) {
     case 0xE848: return bname(B_FIRE);      /* shoot */
     case 0xE84A: return bname(B_JUMP);    /* jump / jetpack */
+    case 0xE849: case 0xE88C: return bname(B_THROW);   /* secondary fire / grenades; ship missiles */
+    case 0xE88B: return bname(B_FIRE);   /* ship lasers */
+    case 0xE851: return bname(B_AIM);   /* zoom */
+    case 0xE856: return bname(B_CYCLE2);   /* switch secondary */
+    case 0xE85C: return bname(B_USE);   /* block / parry: use held */
+    case 0xE8C3: return bname(B_JUMP);   /* boost */
+    case 0xE8C5: return bname(B_CROUCH);   /* decelerate */
+    case 0xE8C9: return bname(B_AUTOPILOT);   /* autopilot */
+    case 0xE8D3: return bname(B_TARGET);   /* acquire target */
     case 0xE854: return bname(B_SPRINT);    /* sprint */
     case 0xE855: return bname(B_CYCLE1);    /* switch weapon */
     case 0xE85A: return bname(B_CROUCH);     /* descend (crouch) */
-    case 0xE8C4: return bname(B_JUMP);   /* take off (boost) */
+    case 0xE8C4: return g_text_thr ? bname(g_text_thr > 0 ? B_SPRINT : B_CROUCH) : bname(B_JUMP);   /* take off (boost); the throttle in the ship hints */
     case 0xE858: case 0xE887: case 0xE8C6: case 0xE8D2:   /* take weapon, get out, exit vehicle / auto-dock, dock / transition */
         if (getenv("SWBES_VEHDBG") && c >= 0xE8C6) { static long at; if (psp_game_frames - at > 60) { at = psp_game_frames; fprintf(stderr, "prompt %04X f%ld\n", c, psp_game_frames); } }
         if (c == 0xE8D2 && getenv("SWBES_AUTOUSE")) { static int done; if (!done) { done = 1; g_use_pend = 1; fprintf(stderr, "autouse f%ld\n", psp_game_frames); } }   /* test: press use at the first transition prompt */
@@ -1343,7 +1355,17 @@ static int bcell(int b) { return g_pad_of[b] ? pg_of_mask(g_pad_of[b]) : -1; }
 static int pc_key_cell(uint32_t c) {
     switch (c) {
     case 0xE848: return PG_RT;
-    case 0xE84A: case 0xE8C4: return bcell(B_JUMP);
+    case 0xE84A: return bcell(B_JUMP);
+    case 0xE8C4: return g_text_thr ? PG_LSTICK : bcell(B_JUMP);   /* throttle in the ship hints: the stick, as on the PSP */
+    case 0xE8C5: return PG_LSTICK;
+    case 0xE849: case 0xE88C: return bcell(B_THROW);
+    case 0xE88B: return PG_RT;
+    case 0xE851: return bcell(B_AIM);
+    case 0xE856: return bcell(B_CYCLE2);
+    case 0xE85C: return bcell(B_USE);
+    case 0xE8C3: return bcell(B_JUMP);
+    case 0xE8C9: return bcell(B_AUTOPILOT);
+    case 0xE8D3: return bcell(B_TARGET);
     case 0xE854: return bcell(B_SPRINT);
     case 0xE855: return PG_Y;
     case 0xE85A: return bcell(B_CROUCH);
@@ -1432,7 +1454,7 @@ static void text_keys_hook(uint32_t addr) {
     }
     if (src < 0x08800000u || src >= 0x0A000000u || (addr == 0x000F0A10u && psp_cpu.r[6] != 0xFFFFFFFFu)) return;
     uint16_t out[512]; int n = 0, hit = 0;
-    { char t[400]; uint32_t i = 0; for (; i < 399; i++) { const uint32_t c = psp_read16(src + 2 * i); if (!c) break; t[i] = c < 128 ? (char)c : ' '; } t[i] = 0; g_text_equip = strstr(t, "equipment") != NULL; g_text_hero = strstr(t, "Decline") != NULL; }
+    { char t[400]; uint32_t i = 0; for (; i < 399; i++) { const uint32_t c = psp_read16(src + 2 * i); if (!c) break; t[i] = c < 128 ? (char)c : ' '; } t[i] = 0; g_text_equip = strstr(t, "equipment") != NULL; g_text_thr = strstr(t, "decelerate") ? -1 : strstr(t, "accelerate") ? 1 : 0; g_text_hero = strstr(t, "Decline") != NULL; }
     { const char *gt = getenv("SWBES_GLYPHTEST");   /* debug: the equipment hint shows codes <base>..<base>+15, each after its low hex digit */
       if (gt && g_text_equip) { const unsigned base = (unsigned)strtoul(gt, NULL, 16); uint16_t o[64]; int k = 0;
         for (unsigned i = 0; i < 16; i++) { o[k++] = (uint16_t)"0123456789ABCDEF"[i]; o[k++] = (uint16_t)(base + i); if (i == 7) o[k++] = 10; }
@@ -1490,7 +1512,8 @@ static void throw_key(uint32_t addr) { (void)addr;
     sp_was = sp;
     { static int k_was; const int k = !g_in_ui && key_held(B_CYCLE1); if (k && !k_was) g_play_wheel = 1; k_was = k; }   /* next_weapon on a key */
     { static int y_was; const int y = !g_in_ui && pad_held(g_pad_of[B_CYCLE1]); if (y && !y_was) g_play_wheel = 1; y_was = y; }   /* pad: next primary weapon */
-    { static int q_was, r_was; const int q = !g_in_ui && BIND_DOWN(B_STUNT), r = !g_in_ui && BIND_DOWN(B_AUTOPILOT);
+    { static int q_was, r_was; const int flying = psp_game_frames - g_fly_frame <= 2;   /* on foot R reloads: no autopilot queued for later */
+      const int q = !g_in_ui && flying && BIND_DOWN(B_STUNT), r = !g_in_ui && flying && BIND_DOWN(B_AUTOPILOT);
       /* starfighter: stunt = 15 / 16 with A / D (barrel rolls), else 14 (flip); autopilot = 18 */
       if (q && !q_was) { const float rx = psp_menu_open() ? 0.0f : psp_pad()->rx, sx = fabsf(rx) > fabsf(move_x()) ? rx : move_x();   /* either stick: the right one steers a ship */
           g_fly_pend_ch = sx < -0.5f ? 15 : sx > 0.5f ? 16 : 14; }
@@ -1502,7 +1525,7 @@ static void throw_key(uint32_t addr) { (void)addr;
         if (raw != raw_was && getenv("SWBES_VEHDBG")) fprintf(stderr, "use key %s f%ld in_ui %d fly_age %ld\n", raw ? "down" : "up", psp_game_frames, g_in_ui, psp_game_frames - g_fly_frame);
         raw_was = raw; }
       /* the press waits for whichever seat reads use (a starfighter may not read it every frame) */
-      if (u && down_at < 0) { down_at = psp_game_frames; g_use_pend = 1; }
+      if (u && down_at < 0) { down_at = psp_game_frames; g_use_pend = 1; g_use_frame = psp_game_frames; }   /* every ch 23 read this frame sees it, as a PSP tap: the weapon pickup reads it before the use handler */
       g_block = u && psp_game_frames - down_at > 15;
       if (!u) down_at = -1; }
     { static int y_was, n_was; const int y = !g_in_ui && BIND_DOWN(B_HERO_YES), n = !g_in_ui && BIND_DOWN(B_HERO_NO);
@@ -1525,7 +1548,7 @@ static void weapon_keys(uint32_t soldier) {
         }
         was[i] = d;
     }
-    if (g_play_wheel && psp_game_frames - g_seat_frame > 2) { if (np > 1) game_call(0x002DC830u, inv, 0, 0xFFFFFFFFu); g_play_wheel = 0; }
+    if (g_play_wheel && psp_game_frames - g_seat_frame > 2) { if (np > 1) g_wheel21 = 1; g_play_wheel = 0; }   /* as the PSP's tap on ch 21, so the tutorial sees the swap */
     g_throw_ok = ns != 0;
 }
 
@@ -1743,7 +1766,7 @@ static void menu_mouse(void) {
     if (f == last) return;
     last = f;
     float mx, my; const int in = psp_ui_cursor(&mx, &my);
-    uint32_t hit = 0, hit_pg = 0, back = 0, lst = 0, lst_pg = 0, prompt = 0; int ui = 0, ctrl = 0, lst_row = -1; float prompt_x0 = 0.0f;
+    uint32_t hit = 0, hit_pg = 0, back = 0, lst = 0, lst_pg = 0, prompt = 0; int ui = 0, tut = 0, ctrl = 0, lst_row = -1; float prompt_x0 = 0.0f;
     /* Buttons the game refuses focus to (enemy or empty spawn points on the
      * spawn map): it snaps focus back to its default, so hovering across one
      * jumped the selection to the first command post. Remember them per page. */
@@ -1810,9 +1833,11 @@ static void menu_mouse(void) {
                     { 0x63D1F4CEu, 0x8000 },   /*   Sell Item, Square */
                     { 0x1F251C76u, 0x2000 },   /*   Cancel, Circle */
                     { 0x7BED7786u, 0x4000 },   /*   Edit, Cross */
+                    { 0x1594B8A3u, 0x4000 },   /* in-match tutorial popup: Continue, Cross */
                     { 0x2CA28F67u, 0 }, { 0xDB4653CDu, 0 },   /* "Scroll list", "Select Spawn Point": the d-pad, nothing to click */
                 };
                 const uint32_t txt = psp_read32(w + 0x34); uint32_t btn = 0; int known = 0;
+                if (txt == 0x1594B8A3u) ui = tut = 1;   /* the popup pauses play: Enter must be Cross, not Start */
                 for (size_t q = 0; q < sizeof P / sizeof P[0]; q++) if (P[q].txt == txt) { btn = P[q].btn; known = 1; }
                 const float x0 = psp_read_f32(w + 0x60), y0 = psp_read_f32(w + 0x64), x1 = psp_read_f32(w + 0x68), y1 = psp_read_f32(w + 0x6C);
                 if (in && x1 > x0 && mx >= x0 && mx < x1 && my >= y0 && my < y1) {
@@ -1846,7 +1871,7 @@ static void menu_mouse(void) {
             if (!bad && in && mx >= x0 && mx < x1 && my >= y0 && my < y1) { hit = w; hit_pg = p; }
         }
     }
-    psp_ui_set(ui); g_in_ui = ui; g_ctrl_page = ctrl;
+    psp_ui_set(ui); g_in_ui = ui; g_tut_popup = tut; g_ctrl_page = ctrl;
     { static long dchk; if (f - dchk > 30) { dchk = f; FILE *df = fopen("widgets.cmd", "rb");   /* debug: dump the live pages' widgets */
         if (df) { fclose(df); remove("widgets.cmd");
           for (int i = 0; i < g_pgn; i++) { if (g_pg_frame[i] < f - 2) continue;
