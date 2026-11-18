@@ -1,0 +1,136 @@
+/* psprecomp — PSP memory map.
+ *
+ * The Allegrex has no TLB. Addresses are decoded by their top bits into a
+ * handful of fixed regions, which makes the recompiled memory path cheap:
+ * mask off the segment bits, index a flat host allocation.
+ *
+ *   0x00010000-0x00013FFF   scratchpad  (16 KB, fast on-chip)
+ *   0x04000000-0x041FFFFF   VRAM        (2 MB)
+ *   0x08000000-0x09FFFFFF   main RAM    (32 MB on PSP-2000+, 24 MB usable
+ *                                        on PSP-1000 where it ends at 0x09FFFFFF
+ *                                        but only 0x087FFFFF is user memory)
+ *
+ * Each region is mirrored at three segment bases, which differ only in cache
+ * behaviour — irrelevant to us, so we fold them together:
+ *   0x0.......  kernel, cached
+ *   0x4.......  uncached mirror
+ *   0x8.......  kernel-only, cached
+ * We mask with PSP_ADDR_MASK to collapse all three onto one backing store.
+ */
+#ifndef PSPRECOMP_MEM_H
+#define PSPRECOMP_MEM_H
+
+#include <stdint.h>
+#include <string.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#define PSP_ADDR_MASK       0x3FFFFFFFu  /* collapse the cache-mirror segments */
+
+#define PSP_SCRATCH_BASE    0x00010000u
+#define PSP_SCRATCH_SIZE    0x00004000u  /* 16 KB */
+#define PSP_VRAM_BASE       0x04000000u
+#define PSP_VRAM_SIZE       0x00200000u  /* 2 MB */
+#define PSP_RAM_BASE        0x08000000u
+#define PSP_RAM_SIZE        0x02000000u  /* 32 MB */
+
+typedef struct {
+    uint8_t *ram;        /* PSP_RAM_SIZE bytes */
+    uint8_t *vram;       /* PSP_VRAM_SIZE bytes */
+    uint8_t *scratch;    /* PSP_SCRATCH_SIZE bytes */
+} psp_memory;
+
+extern psp_memory psp_mem;
+
+int  psp_mem_init(void);
+void psp_mem_free(void);
+
+/* Map the loaded module's image.
+ *
+ * A relocatable PRX links at address 0, and the recompiled C has those
+ * addresses baked in as literals — `lui $v1, 0x9` becomes `0x00090000`. So the
+ * module's own code and data live *outside* the console's RAM window
+ * (0x08000000+) and need their own mapping at wherever the module was linked.
+ * A statically linked module already sits inside RAM and needs none of this.
+ *
+ * Call once, before loading segments. Returns 0 on success. */
+int psp_mem_map_module(uint32_t base, uint32_t size);
+
+/* Resolve a guest address to a host pointer, or NULL if unmapped.
+ * `size` is the access width; a read straddling the end of a region is
+ * rejected rather than silently truncated. */
+void *psp_mem_ptr(uint32_t addr, uint32_t size);
+
+/* The PSP is little-endian and so is every host we target, so these are plain
+ * loads once the address is resolved. Unmapped accesses return 0 / are dropped
+ * and bump psp_mem_bad_access — a recompiled game that starts faulting here is
+ * telling you the analysis missed something, so it is counted, not ignored. */
+extern uint64_t psp_mem_bad_access;
+void psp_mem_watch_write(uint32_t addr);
+/* Print each distinct function that reads `addr` (up to 16), once. */
+void psp_mem_watch_read(uint32_t addr);
+int psp_mem_watch_hits(void);
+
+uint8_t  psp_read8_slow (uint32_t addr);
+uint16_t psp_read16_slow(uint32_t addr);
+uint32_t psp_read32_slow(uint32_t addr);
+float    psp_read_f32_slow(uint32_t addr);
+
+void psp_write8_slow (uint32_t addr, uint8_t  val);
+void psp_write16_slow(uint32_t addr, uint16_t val);
+void psp_write32_slow(uint32_t addr, uint32_t val);
+void psp_write_f32_slow(uint32_t addr, float val);
+
+/* Fast path, inlined into the recompiled code (PPSSPP's "fastmem" idea): one
+ * table lookup per access instead of a call and a chain of region tests.
+ * psp_page[] maps each 64 KB page lying wholly inside a region to its host
+ * memory; anything else -- unmapped, partial pages, an access crossing a page,
+ * or any debug watch being active (psp_mem_slow, psp_watch_live,
+ * psp_rwatch_live) -- takes the original checked path. */
+#define PSP_PAGE_SHIFT 16
+#define PSP_PAGE_SIZE  (1u << PSP_PAGE_SHIFT)
+extern uint8_t *psp_page[(PSP_ADDR_MASK + 1u) >> PSP_PAGE_SHIFT];
+extern int psp_mem_slow;
+extern uint32_t psp_watch_live, psp_rwatch_live;
+
+#ifndef PSP_FORCEINLINE
+#ifdef _MSC_VER
+#define PSP_FORCEINLINE static __forceinline   /* MSVC left these as calls in hot paths */
+#else
+#define PSP_FORCEINLINE static inline
+#endif
+#endif
+static inline uint8_t *psp_fast_ptr(uint32_t addr, uint32_t size) {
+    const uint32_t a = addr & PSP_ADDR_MASK, off = a & (PSP_PAGE_SIZE - 1);
+    uint8_t *b = psp_page[a >> PSP_PAGE_SHIFT];
+    return (b && off <= PSP_PAGE_SIZE - size) ? b + off : (uint8_t *)0;
+}
+#define PSP_FAST_READ(T, slow, watch)                                       \
+    uint8_t *p = (watch) ? (uint8_t *)0 : psp_fast_ptr(addr, sizeof(T));  \
+    if (p) { T v; memcpy(&v, p, sizeof v); return v; }                    \
+    return slow(addr);
+#define PSP_FAST_WRITE(T, slow, watch)                                      \
+    uint8_t *p = (watch) ? (uint8_t *)0 : psp_fast_ptr(addr, sizeof(T));  \
+    if (p) { memcpy(p, &val, sizeof val); return; }                       \
+    slow(addr, val);
+
+static inline uint8_t  psp_read8 (uint32_t addr) { PSP_FAST_READ(uint8_t,  psp_read8_slow,  psp_mem_slow) }
+static inline uint16_t psp_read16(uint32_t addr) { PSP_FAST_READ(uint16_t, psp_read16_slow, psp_mem_slow) }
+static inline uint32_t psp_read32(uint32_t addr) { PSP_FAST_READ(uint32_t, psp_read32_slow, psp_mem_slow | psp_rwatch_live) }
+PSP_FORCEINLINE float    psp_read_f32(uint32_t addr) { PSP_FAST_READ(float, psp_read_f32_slow, psp_mem_slow | psp_rwatch_live) }
+static inline void psp_write8 (uint32_t addr, uint8_t  val) { PSP_FAST_WRITE(uint8_t,  psp_write8_slow,  psp_mem_slow) }
+static inline void psp_write16(uint32_t addr, uint16_t val) { PSP_FAST_WRITE(uint16_t, psp_write16_slow, psp_mem_slow) }
+static inline void psp_write32(uint32_t addr, uint32_t val) { PSP_FAST_WRITE(uint32_t, psp_write32_slow, psp_mem_slow | psp_watch_live) }
+PSP_FORCEINLINE void psp_write_f32(uint32_t addr, float val) { PSP_FAST_WRITE(float, psp_write_f32_slow, psp_mem_slow | psp_watch_live) }
+
+/* Bulk copy into guest memory — used by the loader to place PRX segments. */
+int psp_mem_write_block(uint32_t addr, const void *src, uint32_t len);
+int psp_mem_read_block(void *dst, uint32_t addr, uint32_t len);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* PSPRECOMP_MEM_H */

@@ -1,0 +1,12 @@
+build/
+build-*/
+captures/
+work/
+/third_party/
+games/swbes/third_party/
+# Your own copy of the game: never committed.
+game_data/*
+!game_data/README.txt
+*.iso
+*.elf
+dist/
