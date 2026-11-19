@@ -1352,6 +1352,14 @@ static int gl_read_display(uint32_t addr, uint32_t stride, int fmt, uint32_t *ou
                 g_hi_w = iw; g_hi_h = ih; g_hi_ready = slot;
                 ReleaseSRWLockExclusive(&g_hi_lock);
             }
+            {   /* "shothi.cmd" in the working dir: this frame at the window's resolution (livehi.ppm) */
+                static unsigned chk; FILE *cf;
+                if (++chk % 30 == 0 && (cf = fopen("shothi.cmd", "rb")) != NULL) {
+                    fclose(cf); remove("shothi.cmd"); FILE *o = fopen("livehi.ppm", "wb");
+                    if (o) { fprintf(o, "P6\n%d %d\n255\n", iw, ih);
+                        for (int y = 0; y < ih; y++) for (int x = 0; x < iw; x++) { const uint32_t c = p[(size_t)y * iw + x];
+                            const uint8_t rgb[3] = { (uint8_t)(c >> 16), (uint8_t)(c >> 8), (uint8_t)c }; fwrite(rgb, 1, 3, o); }
+                        fclose(o); } } }
             static int xs[480], xw;           /* column of each 480-wide sample */
             if (xw != iw) { for (int x = 0; x < 480; x++) xs[x] = (x * iw + iw / 2) / 480; xw = iw; }
             for (int y = 0; y < 272; y++) {

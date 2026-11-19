@@ -124,14 +124,14 @@ void psp_trace_watch(uint32_t addr, void (*fn)(uint32_t)) {
      * function entry of the game through psp_trace_enter (~5% of a frame) */
     if (fn) psp_trace_hook_bits[(addr >> 2 & 4095) >> 5] |= 1u << ((addr >> 2) & 31);
 }
-/* Persistent hooks (game layers): up to 16, filtered by a 4096-bit bitmap so
+/* Persistent hooks (game layers): up to 32, filtered by a 4096-bit bitmap so
  * the per-entry cost stays one load and a test. */
-static struct { uint32_t addr; void (*fn)(uint32_t); } g_hooks[16];
+static struct { uint32_t addr; void (*fn)(uint32_t); } g_hooks[32];
 static int g_nhooks;
 uint32_t psp_trace_hook_bits[128];
 #define g_hook_bits psp_trace_hook_bits
 void psp_trace_hook(uint32_t addr, void (*fn)(uint32_t)) {
-    if (g_nhooks >= 16) { fprintf(stderr, "psp_trace_hook: table full, %08X dropped\n", addr); return; }
+    if (g_nhooks >= 32) { fprintf(stderr, "psp_trace_hook: table full, %08X dropped\n", addr); return; }
     g_hooks[g_nhooks].addr = addr; g_hooks[g_nhooks].fn = fn; g_nhooks++;
     g_hook_bits[(addr >> 2 & 4095) >> 5] |= 1u << ((addr >> 2) & 31);
 }

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.4
+
+This is the last update for a while.
+
+- Galactic Conquest: mouse hover and clicks go only to the menu that takes input; Esc on the map opens the conquest menu, as Start does.
+- Galactic Conquest: the Navigate and Purchase prompts show the arrow keys, or the controller's d-pad, instead of the PSP d-pad.
+- Cheats tab: everyone / half / two become heroes, offer hero to both teams, turbo, launch everyone up, kill soldiers / tanks / flyers / turrets / vehicle riders, heal turrets, +10000 credits.
+- Fixed: Endor could freeze with a hero (Cheat.MakeHero).
+
 ## 0.1.3
 
 - Vehicles: getting in or out no longer needs a second press.

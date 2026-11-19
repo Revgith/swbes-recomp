@@ -40,6 +40,7 @@ static volatile uint8_t g_fake[256]; static volatile LONG g_nfake;
 void psp_key_fake(int vk, int down) { if ((g_fake[vk & 255] != 0) != (down != 0)) { g_fake[vk & 255] = (uint8_t)(down != 0); InterlockedExchangeAdd(&g_nfake, down ? 1 : -1); } }
 static int key_down(int vk) { return g_fake[vk & 255] || (GetAsyncKeyState(vk) & 0x8000); }
 static HWND g_hwnd; static int g_menu;   /* defined below */
+static volatile LONG g_esc_start;   /* psp_ui_esc_start */
 /* For game layers: a key held, only while the window has focus (or a test holds it). */
 int psp_key_down(int vk) { return g_fake[vk & 255] || (g_hwnd && GetForegroundWindow() == g_hwnd && !g_menu && (GetAsyncKeyState(vk) & 0x8000)); }
 
@@ -79,6 +80,7 @@ static int kd(int vk) { const int v = psp_key_remap ? psp_key_remap(vk) : vk; re
  * the PSP-button keys only work in the game's menus, and in play every key is
  * free for that layer's own binds. Tab (Select) and P (Start) still pass. */
 int psp_direct_play;
+static int g_kb_idle;
 static uint32_t keyboard(uint8_t *ax, uint8_t *ay) {
     static const struct { int vk; uint32_t bit; } K[] = {
         { VK_UP, B_UP }, { VK_RIGHT, B_RIGHT }, { VK_DOWN, B_DOWN }, { VK_LEFT, B_LEFT },
@@ -98,13 +100,14 @@ static uint32_t keyboard(uint8_t *ax, uint8_t *ay) {
         { VK_SPACE, 0, B_CROSS },
     };
     static uint32_t held[sizeof C / sizeof C[0]];
+    if (g_kb_idle) { memset(held, 0, sizeof held); g_kb_idle = 0; }   /* keys went unread (unfocused): none is still held */
     uint32_t b = 0;
     for (size_t i = 0; i < sizeof K / sizeof K[0]; i++)
         if (K[i].vk != VK_RETURN && K[i].vk != VK_BACK && kd(K[i].vk)
             && (g_ui || K[i].vk == VK_TAB || K[i].vk == 'P' || !psp_direct_play)) b |= K[i].bit;
     for (size_t i = 0; i < sizeof C / sizeof C[0]; i++) {
         if (!kd(C[i].vk)) { held[i] = 0; continue; }
-        if (!held[i]) held[i] = g_ui ? C[i].menu : C[i].play;
+        if (!held[i]) held[i] = g_ui ? (C[i].vk == VK_ESCAPE && g_esc_start ? B_START : C[i].menu) : C[i].play;
         b |= held[i];
     }
     int x = 0, y = 0;
@@ -290,7 +293,7 @@ static uint32_t pad(uint8_t *ax, uint8_t *ay) {
 
 /* ---- PC settings (see window.h) ------------------------------------- */
 static psp_settings_t g_set;
-static const psp_settings_t g_def = { 60, 100, 0, 100, 0, 0, 0, 0, 0, 1, 0, 100, 0, 0, 1, 100 };
+static const psp_settings_t g_def = { 60, 100, 0, 100, 0, 0, 0, 0, 0, 1, 0, 100, 0, 1, 1, 100 };
 static const char *ini_path(void) {
     static char p[MAX_PATH];
     if (!p[0]) { GetCurrentDirectoryA(MAX_PATH - 16, p); strcat(p, "\\settings.ini"); }
@@ -308,6 +311,11 @@ psp_settings_t *psp_settings(void) {
         loaded = 1;
     }
     return &g_set;
+}
+void psp_settings_reload(void) {
+#define LOAD(f) g_set.f = (int)GetPrivateProfileIntA("pc", #f, g_def.f, ini_path());
+    psp_settings(); SET_FIELDS(LOAD)
+#undef LOAD
 }
 void psp_settings_save(void) {
     char v[16];
@@ -581,22 +589,25 @@ static volatile LONG g_ui, g_cx = -1, g_cy = -1, g_clicks, g_rclicks, g_wheel, g
 #define WM_UI_RELEASE (WM_APP + 1)
 #define WM_UI_RECAPTURE (WM_APP + 2)
 static volatile LONG g_recap;   /* the mouse was looking when a menu came up: take it back after */
+
+void psp_ui_esc_start(int on) { g_esc_start = on; }
 void psp_ui_set(int on) {
     if (on == g_ui) return;
     g_ui = on;
     if (getenv("PSPRECOMP_UIDEBUG")) fprintf(stderr, "ui mode %d\n", on);
-    if (on) { g_recap = g_mcap; if (g_mcap && g_hwnd) PostMessageA(g_hwnd, WM_UI_RELEASE, 0, 0); }
+    if (on) { if (g_mcap) g_recap = 1; if (g_mcap && g_hwnd) PostMessageA(g_hwnd, WM_UI_RELEASE, 0, 0); }
     else if (g_recap && g_hwnd) { g_recap = 0; PostMessageA(g_hwnd, WM_UI_RECAPTURE, 0, 0); }
     InterlockedExchange(&g_clicks, 0); InterlockedExchange(&g_rclicks, 0); InterlockedExchange(&g_wheel, 0);
 }
 int psp_ui_cursor(float *x, float *y) {
     const LONG cx = g_cx, cy = g_cy;
     *x = (float)cx / 16.0f; *y = (float)cy / 16.0f;
-    return cx >= 0 && cy >= 0 && cx < W * 16 && cy < H * 16 && !g_mcap;
+    return cx >= 0 && cy >= 0 && cx < W * 16 && cy < H * 16 && !g_mcap && !g_menu;
 }
 void psp_ui_take(int *clicks, int *rclicks, int *wheel, int *moved) {
     *clicks = InterlockedExchange(&g_clicks, 0); *rclicks = InterlockedExchange(&g_rclicks, 0);
     *wheel = InterlockedExchange(&g_wheel, 0); *moved = InterlockedExchange(&g_moved, 0);
+    if (g_menu) *clicks = *rclicks = *wheel = *moved = 0;   /* the PC menu has the mouse */
 }
 /* Client pixel -> PSP pixel (x16), through the same letterbox as paint(). */
 static void track_cursor(HWND h, int mx, int my) {
@@ -617,7 +628,7 @@ static void mouse_capture(HWND h, int on) {
 int  psp_mouse_captured(void) { return g_mcap; }
 int  psp_mouse_left(void) { return (g_mcap && g_mlb) || g_fake[VK_LBUTTON]; }   /* key.cmd "1 1" holds it */
 int  psp_mouse_right(void) { return (g_mcap && g_mrb) || g_fake[VK_RBUTTON]; }   /* key.cmd "2 1" holds it */
-void psp_mouse_take(long *dx, long *dy) { *dx = InterlockedExchange(&g_mdx, 0); *dy = InterlockedExchange(&g_mdy, 0); }
+void psp_mouse_take(long *dx, long *dy) { *dx = InterlockedExchange(&g_mdx, 0); *dy = InterlockedExchange(&g_mdy, 0); if (g_menu) *dx = *dy = 0; }   /* the PC menu has the mouse */
 void psp_mouse_inject(long dx, long dy) { InterlockedExchangeAdd(&g_mdx, dx); InterlockedExchangeAdd(&g_mdy, dy); }
 /* test/automation: put the menu cursor at PSP pixel (x, y), optionally with a click */
 void psp_ui_cursor_inject(int x, int y, int click) { g_cx = x * 16; g_cy = y * 16; InterlockedExchange(&g_moved, 1); if (click) InterlockedIncrement(&g_clicks); }
@@ -641,7 +652,7 @@ static LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         uint8_t ax = 128, ay = 128;
         uint32_t b = pad(&ax, &ay);
         if (GetForegroundWindow() == h || g_nfake) b |= keyboard(&ax, &ay);   /* keys only when focused */
-        else mouse_capture(h, 0);
+        else { g_kb_idle = 1; mouse_capture(h, 0); }
         if (psp_fire_r ? psp_fire_r() : (g_mcap && g_mlb)) b |= 0x200;
         {   /* the PC menu on the pad: Back + Start opens / closes it; ImGui moves
              * through it (ui.cpp); B goes back or closes, Start closes */

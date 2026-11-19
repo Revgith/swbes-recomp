@@ -99,6 +99,19 @@ extern uint32_t g_player_soldier; extern volatile long psp_game_frames;
 static const psp_cheat_t k_cheats[] = {
     { "Become a hero", "Cheat.MakeHero" },
     { "All bots become heroes", "HeroAllBots" },
+    { "Everyone becomes a hero", "Cheat.Melee" },
+    { "Half become heroes", "Cheat.MeleeHalf" },
+    { "Two become heroes", "Cheat.MeleeDuo" },
+    { "Offer hero to both teams", "Cheat.OfferHero" },
+    { "Turbo speed", "Cheat.Turbo" },
+    { "Launch everyone up", "Cheat.Jump" },
+    { "Kill all soldiers", "Cheat.KillHuman" },
+    { "Kill all tanks", "Cheat.KillTank" },
+    { "Kill all flyers", "Cheat.KillFlyer" },
+    { "Kill all turrets", "Cheat.KillTurret" },
+    { "Kill vehicle riders", "Cheat.KillAttached" },
+    { "Heal all turrets", "Cheat.HealTurret" },
+    { "+10000 credits", "SWB.GC.GiveCredits 10000" },
     { "Refill ammo", "SWB.Restock" },
     { "Republic / Rebels win", "Cheat.GoodWin" },
     { "CIS / Empire win", "Cheat.EvilWin" },
@@ -145,7 +158,7 @@ static int board(uint32_t id) {
 /* SWBES_QM_BOARD=<hex vehicle id, 1 for any flyer, "tank" or "turret">: board it a second after
  * spawning. Noticed in the soldier's per-frame update, done from con_run. */
 static uint32_t g_gnd_map;
-uint32_t g_hum_map; static long g_force_ch = -1, g_force_until, g_use_until = -1; static int g_block, g_use_pend; static long g_use_frame = -1; static long g_fly_pend_ch = -1;
+uint32_t g_hum_map; static long g_hum_frame = -100; static long g_force_ch = -1, g_force_until, g_use_until = -1; static int g_block, g_use_pend; static long g_use_frame = -1; static long g_fly_pend_ch = -1;
 /* PC key binds, one per game action, read from the [keys] section of
  * settings.ini (missing entries are written back with their default, so the
  * file always lists every bind). Values are key names: a letter or digit,
@@ -193,8 +206,29 @@ static void bind_note(const char *fmt, ...) {
 static const unsigned g_pad_def[B_COUNT]; static unsigned g_pad_of[B_COUNT];   /* below */
 /* Every action takes a pad button ([pad]); the sticks move and aim as well. */
 static int pad_bindable(int b) { (void)b; return 1; }
+/* settings.ini written by an older release keeps that release's defaults.
+ * [meta] version says which defaults the file has; a bind still at the old
+ * default moves to the new one, a bind the player changed stays. */
+static void settings_migrate(const char *ini) {
+    static const struct { int ver; const char *sec, *id, *was, *now; } M[] = {
+        { 1, "keys", "weapon_action", "None", "R" },   /* 0.1.1: R reloads */
+        { 1, "pad", "weapon_action", "None", "Left" },   /* 0.1.3: d-pad left reloads */
+        { 1, "pc", "filter", "0", "1" },   /* 0.1.3: colour grade on */
+    };
+    enum { CUR = 1 };
+    char v[32];
+    int ver = (int)GetPrivateProfileIntA("meta", "version", -1, ini);
+    if (ver < 0) { GetPrivateProfileStringA("keys", "jump", "", v, sizeof v, ini); ver = v[0] ? 0 : CUR; }   /* no stamp: an old file, or none yet */
+    for (size_t i = 0; i < sizeof M / sizeof M[0]; i++) {
+        if (M[i].ver <= ver) continue;
+        GetPrivateProfileStringA(M[i].sec, M[i].id, "", v, sizeof v, ini);
+        if (!_stricmp(v, M[i].was)) { WritePrivateProfileStringA(M[i].sec, M[i].id, M[i].now, ini); if (!strcmp(M[i].sec, "pc")) psp_settings_reload(); fprintf(stderr, "settings.ini: %s %s %s -> %s\n", M[i].sec, M[i].id, M[i].was, M[i].now); }
+    }
+    if (ver != CUR) { snprintf(v, sizeof v, "%d", CUR); WritePrivateProfileStringA("meta", "version", v, ini); }
+}
 static void binds_load(void) {
     char ini[MAX_PATH], v[32]; GetCurrentDirectoryA(MAX_PATH - 16, ini); strcat(ini, "\\settings.ini");
+    settings_migrate(ini);
     for (int i = 0; i < B_COUNT; i++) {
         if (!pad_bindable(i)) { g_pad_of[i] = 0; continue; }
         GetPrivateProfileStringA("pad", g_bind[i].id, "", v, sizeof v, ini);
@@ -281,7 +315,7 @@ static int take_press(int b) { static long f[B_COUNT]; static int was[B_COUNT], 
     if (pend[b]) { pend[b] = 0; return 1; } return 0; }
 /* Fire goes straight to the soldier (ch 8), ship (10) and ground vehicle (11) channels; anything
  * else (turrets, other seats) still gets the PSP's R, from the same bind: the window asks here. */
-static volatile long g_fire_direct = -100; static int g_in_ui;
+static volatile long g_fire_direct = -100; static int g_in_ui, g_pages_live, g_esc_on, g_gc_menu; static long g_watch_frame = -100;   /* g_pages_live, g_esc_on: status.txt, for test scripts */
 static int fire_r(void) { return !g_in_ui && psp_game_frames - g_fire_direct > 3 && fire_held(); }
 static int aim_held(void)  { return BIND_DOWN(B_AIM); }
 /* Movement: WASD, else the left stick (x right, y forward). */
@@ -378,7 +412,10 @@ static void con_run(void) {
         size_t i = 0, n = sizeof k_console_cmds / sizeof *k_console_cmds;
         while (i < n && _stricmp(k_console_cmds[i].name, name)) i++;
         if (i == n) { fprintf(stderr, "console: no command '%s'\n", name); continue; }
-        g_con_echo = 1; game_call(k_console_cmds[i].fn, (uint32_t)help, (uint32_t)a1, (uint32_t)a2); g_con_echo = 0;
+        g_con_echo = 1;
+        if (k_console_cmds[i].fn == 0x002FBEBCu) game_call(k_console_cmds[i].fn, (uint32_t)a1, (uint32_t)help, 0);   /* GiveCredits: (amount, help) */
+        else game_call(k_console_cmds[i].fn, (uint32_t)help, (uint32_t)a1, (uint32_t)a2);
+        g_con_echo = 0;
         fprintf(stderr, "console: ran %s%s\n", help ? "help " : "", k_console_cmds[i].name);
     }
 }
@@ -462,6 +499,7 @@ static void ctl_get(uint32_t addr) { ctl_get2(addr);   /* SWBES_CHLOG: each chan
 static long g_seat_any = -100;   /* last frame a turret or walker updated, menu or not */
 static void ctl_get2(uint32_t addr) { (void)addr;
     const uint32_t m = psp_cpu.r[4], ch = psp_cpu.r[5];
+    if (m == g_hum_map && m) g_hum_frame = psp_game_frames;   /* the player's on-foot controls are read: in play, menu flags or not */
     if (getenv("SWBES_MAPDUMP")) map_dump(m, ch, psp_read32(psp_cpu.r[29] + 8));
     if (getenv("SWBES_OTHERLOG") && m != g_hum_map && ch < 32) {   /* other controllers (turrets, vehicles): log each channel turning on / off */
         static uint32_t ms[16], nz[16]; int i; for (i = 0; i < 16 && ms[i] && ms[i] != m; i++) {}
@@ -521,7 +559,7 @@ static void ctl_get2(uint32_t addr) { (void)addr;
     static long gnd_frame = -100;
     const int gnd = caller >= 0x00240A00u && caller < 0x00240B20u && !g_in_ui;
     static int gnd_was;   /* use held: get out on the next press, not the one that got in */
-    if (gnd) { if (psp_game_frames - gnd_frame > 30) { gnd_was = 1; g_use_pend = 0; } g_gnd_map = m; gnd_frame = psp_game_frames; }
+    if (gnd) { if (psp_game_frames - gnd_frame > 30) { gnd_was = 1; g_use_pend = 0; } g_gnd_map = m; gnd_frame = g_seat_any = psp_game_frames; }   /* g_seat_any: a seat is live, not a bare menu */
     if (gnd && (long)ch == g_force_ch && psp_game_frames <= g_force_until) { psp_write_f32(psp_read32(m + 16) + 4 * ch, g_force_ch == 1 ? -1.0f : 1.0f); return; }   /* debug force */
     if (ch == 7 && m == g_gnd_map && psp_game_frames - gnd_frame <= 2 && !g_in_ui) { const int u = BIND_DOWN(B_USE);   /* use: get out, on the press */
         if (u && !gnd_was) { g_use_pend = 0; g_use_frame = -1;   /* this press is the exit: on foot it would re-enter */
@@ -779,7 +817,7 @@ enum { PG_COLS = 7, PG_CODE = 0xEA20, PG_CELLS = PG_N * PSP_NSTYLE };
 /* Key caps for in-game hints, after the pad glyphs in the same atlas: the
  * mouse, the named keys (g_keynames), A-Z and 0-9. Text uses them as codes
  * KC_CODE + index; the glyph lookup sees them as pad glyph PG_N + index. */
-enum { KC_FIXED = 4 + (int)(sizeof g_keynames / sizeof g_keynames[0]), KC_N = KC_FIXED + 36, KC_CODE = 0xEA60, KC_ROW0 = (PG_CELLS + PG_COLS - 1) / PG_COLS, KC_PER_ROW = 3, PG_ROWS = KC_ROW0 + (KC_N + KC_PER_ROW - 1) / KC_PER_ROW };
+enum { KC_FIXED = 5 + (int)(sizeof g_keynames / sizeof g_keynames[0]), KC_N = KC_FIXED + 36, KC_CODE = 0xEA60, KC_ROW0 = (PG_CELLS + PG_COLS - 1) / PG_COLS, KC_PER_ROW = 3, PG_ROWS = KC_ROW0 + (KC_N + KC_PER_ROW - 1) / KC_PER_ROW };
 static const char *kc_name(int i);
 /* Key caps sit two cells wide, left-aligned, from row KC_ROW0; a cap is as wide as its name needs. */
 /* A hint cap's width in cells: its name's measured width plus the same side
@@ -802,9 +840,9 @@ static float kc_w(int i) {
 }
 static void kc_cell(int i, int *col, int *row) { *col = (i % KC_PER_ROW) * 2; *row = KC_ROW0 + i / KC_PER_ROW; }
 static const char *kc_name(int i) {
-    static const char *const F[4] = { "LMB", "RMB", "Wheel", "Mouse" }; static char one[36][2];
-    if (i < 4) return F[i];
-    if (i < KC_FIXED) return g_keynames[i - 4].n;
+    static const char *const F[5] = { "LMB", "RMB", "Wheel", "Mouse", "Arrows" }; static char one[36][2];
+    if (i < 5) return F[i];
+    if (i < KC_FIXED) return g_keynames[i - 5].n;
     i -= KC_FIXED; one[i][0] = (char)(i < 26 ? 'A' + i : '0' + i - 26); return one[i];
 }
 static int kc_index(const char *k, size_t len) {
@@ -1081,7 +1119,7 @@ static const uint32_t *icon_sheet_post(const uint32_t *px, int w, int h, int *ow
           const int ud = !strcmp(u, "Up") && !strcmp(d, "Down"), lr = !strcmp(l, "Left") && !strcmp(r, "Right");   /* both pairs on the arrows: keep the arrow glyph */
           if (!strcmp(k, "\xE2\x86\x95") && !ud) { snprintf(pair, sizeof pair, "%s/%s", u, d); k = pair; }   /* up-down */
           else if (!strcmp(k, "\xE2\x86\x94") && !lr) { snprintf(pair, sizeof pair, "%s/%s", l, r); k = pair; }   /* left-right */
-          else if (!strcmp(k, "\xE2\x9C\xA5") && !(ud && lr)) { snprintf(pair, sizeof pair, "%s%s%s%s", u, l, d, r); k = pair; } }   /* all four */
+          else if (!strcmp(k, "\xE2\x9C\xA5")) { if (ud && lr) k = "Arrows"; else { snprintf(pair, sizeof pair, "%s%s%s%s", u, l, d, r); k = pair; } } }   /* all four */
         int x = C[i].x * S, y = C[i].y * S, cw = C[i].w * S, ch = C[i].h * S;
         if (C[i].w - C[i].h <= 2 && C[i].h - C[i].w <= 2) {   /* square button sprites: the hint caps' proportions (pgt_atlas), the sprite as the glyph cell */
             for (int yy = y; yy < y + ch; yy++) for (int xx = x; xx < x + cw; xx++) big[yy * w * S + xx] = 0;
@@ -1144,6 +1182,10 @@ static const uint32_t *tex_post(const uint32_t *px, int w, int h, int *ow, int *
     if (w == 256 && h == 256) {
         if (!getenv("SWBES_PSP_PROMPTS")) {   /* the HUD sheet: its up/down d-pad at (46,223) is "Scroll list" on the loadout and faction pages */
             int n = 0; for (int i = 0; i < w * h; i++) n += (px[i] >> 24) > 40;
+            if (getenv("SWBES_SPRLOG")) { uint32_t hs = 2166136261u; for (int k = 0; k < 65536; k += 7) hs = (hs ^ px[k]) * 16777619u;
+                char fn[48]; snprintf(fn, sizeof fn, "sheet_%d_%08X.ppm", n, hs); FILE *o = fopen(fn, "rb");
+                if (o) fclose(o); else if ((o = fopen(fn, "wb")) != NULL) { fprintf(o, "P6\n256 256\n255\n");   /* debug: each 256x256 sheet once, over grey */
+                    for (int k = 0; k < 65536; k++) { const uint32_t c = px[k], a = c >> 24; for (int j = 0; j < 3; j++) fputc((int)(((c >> (8 * j) & 255) * a + 90 * (255 - a)) / 255), o); } fclose(o); } }
             if (n == 21457) { enum { S = 4 }; static uint32_t src[256 * 256], big[256 * S * 256 * S]; static int have = -1;
                 const int mode = psp_pad_last() ? 1 + psp_pad_style() : 0;   /* the icon follows the input in use (scroll_icon_watch redecodes on a change) */
                 if (have != mode || memcmp(src, px, sizeof src)) {   /* drawn once per sheet and input */
@@ -1151,7 +1193,14 @@ static const uint32_t *tex_post(const uint32_t *px, int w, int h, int *ow, int *
                     for (int y = 0; y < h * S; y++) for (int x = 0; x < w * S; x++) big[y * w * S + x] = px[(y / S) * w + x / S];
                     for (int y = 223 * S; y < 256 * S; y++) for (int x = 46 * S; x < 80 * S; x++) big[y * w * S + x] = 0;
                     if (mode) pad_glyph(big, w * S, 50 * S, 226 * S, 26 * S, PG_DPAD, mode - 1);   /* the pad's d-pad, at the size of the other glyphs */
-                    else iconcap(big, w * S, 50 * S, 226 * S, 26 * S, 26 * S, icon_mouse_scroll, 66, 0); }   /* 26 texels: on screen, the height of the other caps */   /* drawn untinted: sprite_color */
+                    else iconcap(big, w * S, 50 * S, 226 * S, 26 * S, 26 * S, icon_mouse_scroll, 66, 0);
+                    /* the conquest map's "Navigate" d-pad (145,72 - 179,105): the arrow keys, or the pad's d-pad */
+                    for (int y = 72 * S; y < 105 * S; y++) for (int x = 145 * S; x < 179 * S; x++) big[y * w * S + x] = 0;
+                    if (mode) pad_glyph(big, w * S, 145 * S, 72 * S, 33 * S, PG_DPAD, mode - 1);   /* drawn smaller on screen than the icon sheet's: the whole cell */
+                    else keycap(big, w * S, 148 * S, 77 * S, 28 * S, 24 * S, "✥");
+                    if (getenv("SWBES_DUMPHUD")) { FILE *o = fopen("hudcap.ppm", "wb");   /* debug: the Navigate cap as drawn, over the HUD blue */
+                        if (o) { fprintf(o, "P6\n%d %d\n255\n", 40 * S, 40 * S); for (int y = 70 * S; y < 110 * S; y++) for (int x = 142 * S; x < 182 * S; x++) { const uint32_t c = big[y * w * S + x], a = c >> 24;
+                            const int bg[3] = { 0x18, 0x50, 0x80 }; for (int j = 0; j < 3; j++) fputc((int)(((c >> (8 * j) & 255) * a + bg[j] * (255 - a)) / 255), o); } fclose(o); } } }   /* 26 texels: on screen, the height of the other caps */   /* drawn untinted: sprite_color */
                 *ow = w * S; *oh = h * S; return big; } }
     }
     return icon_sheet_post(px, w, h, ow, oh);
@@ -1161,8 +1210,13 @@ static const uint32_t *tex_post(const uint32_t *px, int w, int h, int *ow, int *
  * sprite is drawn white, like every other prompt. */
 static uint32_t sprite_color(int tw, int th, float u0, float v0, float u1, float v1, uint32_t rgba) {
     static int psp = -1; if (psp < 0) psp = getenv("SWBES_PSP_PROMPTS") != NULL;
+    if (getenv("SWBES_SPRLOG") && u1 - u0 >= 12 && u1 - u0 <= 40 && v1 - v0 >= 12 && v1 - v0 <= 40) {   /* debug: each small sprite once */
+        static uint32_t seen[256]; static int ns; const uint32_t k = (uint32_t)tw * 2654435761u ^ (uint32_t)th * 40503u ^ (uint32_t)u0 * 977u ^ (uint32_t)v0 * 131u;
+        int i = 0; for (; i < ns; i++) if (seen[i] == k) break;
+        if (i == ns && ns < 256) { seen[ns++] = k; fprintf(stderr, "spr %dx%d uv %.0f,%.0f-%.0f,%.0f col %08X\n", tw, th, u0, v0, u1, v1, rgba); fflush(stderr); } }
     if (tw == 256 && th == 128 && u0 >= 100 && u1 <= 216 && !psp)   /* icon sheet d-pads: the game tints them blue; our caps carry their own colours */
         return (rgba & 0xFF000000u) | 0xFFFFFFu;
+    if (tw == 256 && th == 256 && u0 == 145 && v0 == 72 && u1 == 179 && v1 == 105 && !psp) return 0xFFFFFFFFu;   /* the map's Navigate d-pad: the game draws it at 76% */
     if (tw != 256 || th != 256 || u0 != 46 || v0 != 223 || u1 != 80 || v1 != 256) return rgba;
     return psp ? rgba : (rgba & 0xFF000000u) | 0xFFFFFFu;
 }
@@ -1200,6 +1254,7 @@ static const char *psp_icon_key(uint32_t c, int play) {
         { 0xEA10, B_PAUSE, B_PAUSE }, { 0xEA11, B_SELECT, B_SELECT },   /* Start, Select */
     };
     if (play && (c == 0xEA00 || c == 0xEA01 || c == 0xEA02 || c == 0xEA03 || c == 0xEA12 || c == 0xEA13)) return "A / D";   /* the stick, pulled left / right in hints: steer keys */
+    if (c == 0xEA14) return "Arrows";   /* the d-pad: the arrow keys */
     for (size_t i = 0; i < sizeof T / sizeof T[0]; i++) if (T[i].code == c) return g_bind[play ? T[i].play : T[i].ui].name;
     return NULL;
 }
@@ -1208,7 +1263,8 @@ static uint32_t g_pg_learn;   /* PSP icon code being looked up (its hash is lear
 static void glyph_code_hook(uint32_t addr) { (void)addr;   /* 0x3380EC entry, a0 = code */
     const uint32_t c = psp_cpu.r[4] & 0xFFFF;
     if (c >= 0xE800 && getenv("SWBES_PGLOG")) { static uint32_t seen[64]; static int ns; int k = 0; for (; k < ns; k++) if (seen[k] == c) break; if (k == ns && ns < 64) { seen[ns++] = c; fprintf(stderr, "pg: code %04X ra %08X last %d\n", c, psp_cpu.r[31], psp_pad_last()); fflush(stderr); } }
-    const int cell = c >= PG_CODE && c < PG_CODE + PG_N ? (int)(c - PG_CODE) : c >= KC_CODE && c < KC_CODE + KC_N ? PG_N + (int)(c - KC_CODE) : -1;
+    int cell = c >= PG_CODE && c < PG_CODE + PG_N ? (int)(c - PG_CODE) : c >= KC_CODE && c < KC_CODE + KC_N ? PG_N + (int)(c - KC_CODE) : -1;
+    if (c == 0xEA14 && !getenv("SWBES_PSP_PROMPTS")) cell = psp_pad_last() ? PG_DPAD : PG_N + kc_index("Arrows", 6);   /* the d-pad: its picture skips the hash hook, so swap it here */
     g_pg_pending = cell; g_pg_learn = cell < 0 && psp_icon_pad_cell(c) >= 0 ? c : 0;
     if (cell >= 0) psp_cpu.r[4] = 0xEA04;
 }
@@ -1242,6 +1298,8 @@ static void glyph_hash_hook(uint32_t addr) { (void)addr;   /* 0x45C60 entry, a0 
         static struct { uint32_t h, code; } M[32]; static int nm;
         int i = 0; for (; i < nm; i++) if (M[i].h == h) break;
         if (i == nm && learn && nm < 32) { M[nm].h = h; M[nm].code = learn; nm++; }
+        if (getenv("SWBES_PGLOG")) { static uint32_t seen[64]; static int ns; int k = 0; for (; k < ns; k++) if (seen[k] == h) break;
+            if (k == ns && ns < 64) { seen[ns++] = h; fprintf(stderr, "pg: hash %08X learn %04X known %d\n", h, learn, i < nm); fflush(stderr); } }
         if (i == nm || getenv("SWBES_PSP_PROMPTS")) return;
         if (psp_pad_last()) { g = psp_icon_pad_cell(M[i].code); if (g < 0) return; }
         else { const char *k = psp_icon_key(M[i].code, !g_in_ui || g_tut_popup); const int kc = k ? kc_index(k, strlen(k)) : -1;
@@ -1460,7 +1518,8 @@ static void text_keys_hook(uint32_t addr) {
     }
     if (src < 0x08800000u || src >= 0x0A000000u || (addr == 0x000F0A10u && psp_cpu.r[6] != 0xFFFFFFFFu)) return;
     uint16_t out[512]; int n = 0, hit = 0;
-    { char t[400]; uint32_t i = 0; for (; i < 399; i++) { const uint32_t c = psp_read16(src + 2 * i); if (!c) break; t[i] = c < 128 ? (char)c : ' '; } t[i] = 0; g_text_equip = strstr(t, "equipment") != NULL; g_text_thr = strstr(t, "decelerate") ? -1 : strstr(t, "accelerate") ? 1 : 0; g_text_hero = strstr(t, "Decline") != NULL; }
+    { char t[400]; uint32_t i = 0; for (; i < 399; i++) { const uint32_t c = psp_read16(src + 2 * i); if (!c) break; t[i] = c < 128 ? (char)c : ' '; } t[i] = 0; g_text_equip = strstr(t, "equipment") != NULL;
+      { static const char *wt; static int wi; if (!wi) { wi = 1; wt = getenv("SWBES_WATCHTXT"); } if (wt && strstr(t, wt)) g_watch_frame = psp_game_frames; }   /* test hook: status.txt "watch" */ g_text_thr = strstr(t, "decelerate") ? -1 : strstr(t, "accelerate") ? 1 : 0; g_text_hero = strstr(t, "Decline") != NULL; }
     { const char *gt = getenv("SWBES_GLYPHTEST");   /* debug: the equipment hint shows codes <base>..<base>+15, each after its low hex digit */
       if (gt && g_text_equip) { const unsigned base = (unsigned)strtoul(gt, NULL, 16); uint16_t o[64]; int k = 0;
         for (unsigned i = 0; i < 16; i++) { o[k++] = (uint16_t)"0123456789ABCDEF"[i]; o[k++] = (uint16_t)(base + i); if (i == 7) o[k++] = 10; }
@@ -1712,6 +1771,20 @@ static int qm_pick_map(void) {
 }
 
 static uint32_t g_pg[8]; static long g_pg_frame[8]; static int g_pgn;
+/* 0x33D7A4(_, list): calls a method on the list's first entry. With a hero (Cheat.MakeHero)
+ * meeting AI, the list (hash F5CDE173, vtable 0x41F460) holds data records, not objects:
+ * the "vtable" read is a float and the game thread dies. An entry whose vtable is not in
+ * the vtable area is treated as an empty list (what the function returns for none). */
+static void entry_guard(uint32_t addr) { (void)addr;
+    const uint32_t l = psp_cpu.r[5]; if (l < 0x08800000u || l >= 0x0A000000u) return;
+    const uint32_t n = psp_read32(l + 16), arr = psp_read32(l + 20); if (!n || arr < 0x08800000u || arr >= 0x0A000000u) return;
+    const uint32_t e = psp_read32(arr), vt = e >= 0x08800000u && e < 0x0A000000u ? psp_read32(e) : 0;
+    if (e && (vt < 0x00400000u || vt >= 0x00470000u)) { static int told; if (!told++) fprintf(stderr, "entry guard: list %08X entry %08X vtable %08X\n", l, e, vt); psp_cpu.r[5] = 0; }
+}
+/* 0x9E9E8(page, input): the game hands this frame's pad input to one page -- the one that takes input */
+static uint32_t g_in_pg; static long g_in_pg_f = -100;
+static void page_input(uint32_t addr) { (void)addr; g_in_pg = psp_cpu.r[4]; g_in_pg_f = psp_game_frames;
+    if (getenv("SWBES_INPGLOG")) { static uint32_t lp; if (lp != g_in_pg) { lp = g_in_pg; fprintf(stderr, "inpage %08X ra %08X f%ld\n", g_in_pg, psp_cpu.r[31], psp_game_frames); } } }
 static void page_tick(uint32_t addr) {
     (void)addr; const uint32_t p = psp_cpu.r[4]; const long f = psp_game_frames; int slot = -1;
     g_last_page = p; con_run();
@@ -1769,10 +1842,13 @@ static void gui_flush(uint32_t addr) {
 }
 static void menu_mouse(void) {
     static long last = -1; const long f = psp_game_frames;
-    if (f == last) return;
+    /* once per game frame; the conquest menu polls the pad without waiting for vblank, so the frame count stands still there: then every 16 ms */
+    static ULONGLONG last_ms; const ULONGLONG ms = GetTickCount64();
+    if (f == last && ms - last_ms < 16) return;
+    last_ms = ms;
     last = f;
     float mx, my; const int in = psp_ui_cursor(&mx, &my);
-    uint32_t hit = 0, hit_pg = 0, back = 0, lst = 0, lst_pg = 0, prompt = 0, dot = 0, dot_pg = 0; int ui = 0, tut = 0, ctrl = 0, lst_row = -1; float prompt_x0 = 0.0f;
+    uint32_t hit = 0, hit_pg = 0, back = 0, lst = 0, lst_pg = 0, prompt = 0, dot = 0, dot_pg = 0; int ui = 0, other = 0, tut = 0, ctrl = 0, lst_row = -1; float prompt_x0 = 0.0f, hit_d = 0.0f;
     /* Buttons the game refuses focus to (enemy or empty spawn points on the
      * spawn map): it snaps focus back to its default, so hovering across one
      * jumped the selection to the first command post. Remember them per page. */
@@ -1787,22 +1863,32 @@ static void menu_mouse(void) {
     /* The loadout editor (buy menu) draws over the class page, which stays
      * live underneath: while its equipment picker is shown, only its own page
      * takes hover and clicks (prompts still work from any page). */
-    uint32_t modal = 0;
+    uint32_t modal = 0, dlg = 0;   /* dlg: only when no editor is up */
     for (int i = 0; i < g_pgn && !modal; i++) {
-        if (g_pg_frame[i] < f - 2) continue;
+        if (g_pg_frame[i] < f - 2 || !(psp_read32(g_pg[i] + 0x100) & 0x100)) continue;   /* +0x100 bit 8: shown (a closed pause page keeps updating) */
         const uint32_t p = g_pg[i], arr = psp_read32(p + 0x18), n = psp_read32(p + 0x1C) & 0xFFFF;
         if (!arr || n > 256) continue;
         for (uint32_t k = 0; k < n; k++) { const uint32_t w = psp_read32(arr + 4 * k);
             if (w && psp_read32(w + 4) == 0x7DC && (psp_read32(w + 0xCC) & 0xFF)) { modal = p; break; }
             /* the editor without the picker open: its "Done" prompt */
-            if (w && psp_read32(w + 4) == 0x7D1 && psp_read32(w + 0x34) == 0x61A5B0FEu && (psp_read32(w + 0xCC) & 0xFF)) { modal = p; break; } }
+            if (w && psp_read32(w + 4) == 0x7D1 && psp_read32(w + 0x34) == 0x61A5B0FEu && (psp_read32(w + 0xCC) & 0xFF)) { modal = p; break; }
+            /* a dialog (Confirm Purchase?, Not enough credits) over a list: its buttons are nav 0xA, the list's 9 */
+            if (w && psp_read32(w + 4) == 0x7D1 && psp_read32(w + 0x98) == 0xA && (psp_read32(w + 0xCC) & 0x100) && !dlg) dlg = p; }
     }
+    if (!modal) modal = dlg;
+    /* The page the game hands the pad to this frame (0x9E9E8): when it is a live page, it alone takes hover and clicks.
+     * The conquest map and its panels are not pages: none is fed there. */
+    uint32_t inp = 0; if (f - g_in_pg_f <= 2) for (int i = 0; i < g_pgn; i++) if (g_pg[i] == g_in_pg && g_pg_frame[i] >= f - 2) inp = g_in_pg;
+    if (inp) modal = inp;
+    int npg = 0, resume = 0;
     for (int i = 0; i < g_pgn; i++) {
-        if (g_pg_frame[i] < f - 2) continue;
+        if (g_pg_frame[i] < f - 2 || !(psp_read32(g_pg[i] + 0x100) & 0x100)) continue;
+        npg++;
         const uint32_t p = g_pg[i], arr = psp_read32(p + 0x18), n = psp_read32(p + 0x1C) & 0xFFFF;
         if (!arr || n > 256) continue;
         for (uint32_t k = 0; k < n; k++) {
             const uint32_t w = psp_read32(arr + 4 * k);
+            if (w && psp_read32(w + 0x90) == 0xC770472Du && (psp_read32(w + 0xCC) & 0xFF)) resume = 1;   /* the conquest menu's Resume: Start closes it, Circle does nothing */
             if (modal && p != modal && w && (psp_read32(w + 0x98) || psp_read32(w + 4) != 0x7D1)) continue;   /* under the buy menu */
             if (w && psp_read32(w + 4) == 0x7D1 && !psp_read32(w + 0x98) && psp_read32(w + 0x60) == psp_read32(w + 0x68)
                 && psp_read32(w + 0x64) == psp_read32(w + 0x6C) && psp_read32(w + 0x60)) back = psp_read32(w + 0x90);   /* hidden back button */
@@ -1811,7 +1897,7 @@ static void menu_mouse(void) {
              * +0x1E8 rows, +0x200 selected row, +0x20C top row (float),
              * +0x21C rows visible. */
             if (w && (psp_read32(w + 4) == 0x7DA || psp_read32(w + 4) == 0x7DC) && (psp_read32(w + 0xCC) & 0xFF)) {   /* 0x7DC: the loadout editor's equipment picker, same layout */
-                ui = 1;
+                ui = other = 1;
                 const float x0 = psp_read_f32(w + 0x60), y0 = psp_read_f32(w + 0x64), x1 = psp_read_f32(w + 0x68), y1 = psp_read_f32(w + 0x6C);
                 const uint32_t rows = psp_read32(w + 0x1E8), vis = psp_read32(w + 0x21C);
                 if (in && vis && vis < 64 && rows < 4096 && mx >= x0 && mx < x1 && my >= y0 && my < y1) {
@@ -1860,7 +1946,7 @@ static void menu_mouse(void) {
             if (w && psp_read32(w + 4) == 0x7D6 && (psp_read32(w + 0xCC) & 0xFF)) { const uint32_t id = psp_read32(w + 0x90);   /* Controls page lists: infantry, vehicle, starfighter (both schemes) */
                 if (id == 0xAD91E01Cu || id == 0x161D7AD6u || id == 0xDCEA980Cu || id == 0xDDD604E6u || id == 0xEFE2E42Eu || id == 0xDE72AC84u) ctrl = 1; }
             if (w && (psp_read32(w + 0xCC) & 0xFF) && (psp_read32(w + 4) == 0x7D2 || psp_read32(w + 4) == 0x7D3
-                      || (psp_read32(w + 4) == 0x7D1 && !psp_read32(w + 0x98)))) ui = 1;
+                      || (psp_read32(w + 4) == 0x7D1 && !psp_read32(w + 0x98)))) { ui = 1; if (psp_read32(w + 4) != 0x7D1) other = 1; }
             if (!w || psp_read32(w + 4) != 0x7D1 || !psp_read32(w + 0x98) || !(psp_read32(w + 0xCC) & 0xFF)) continue;   /* +0xCC: shown (+0xCF: focused) */
             /* nav 9: a label drawn as a button (the spawn map's command-post info
              * panel). Focusing it makes the game snap to its default command post. */
@@ -1870,7 +1956,7 @@ static void menu_mouse(void) {
             /* The campaign timeline's mission dots (by id). Focusing one directly
              * picked an empty mission, so the mouse walks the d-pad to it. */
             const uint32_t wid = psp_read32(w + 0x90);
-            if ((wid - 0x9EC04F7Du < 10u || wid == 0x3949A072u || wid == 0x3949A073u || wid == 0x382CCFB8u || wid == 0x8135382Fu)) { ui = 1;
+            if ((wid - 0x9EC04F7Du < 10u || wid == 0x3949A072u || wid == 0x3949A073u || wid == 0x382CCFB8u || wid == 0x8135382Fu)) { ui = other = 1;
                 const float x0 = psp_read_f32(w + 0x60), y0 = psp_read_f32(w + 0x64), x1 = psp_read_f32(w + 0x68), y1 = psp_read_f32(w + 0x6C);
                 if (in && mx >= x0 - 4 && mx < x1 + 4 && my >= y0 - 4 && my < y1 + 4) { dot = w; dot_pg = p; }
                 continue; }
@@ -1879,25 +1965,30 @@ static void menu_mouse(void) {
              * of them sit over the real posts, so hovering a post focused a
              * phantom and the game snapped back to its default. */
             if (psp_read32(w + 0x4C) & 0x100) continue;
-            ui = 1;
+            ui = other = 1;
             const float x0 = psp_read_f32(w + 0x60), y0 = psp_read_f32(w + 0x64), x1 = psp_read_f32(w + 0x68), y1 = psp_read_f32(w + 0x6C);
             int bad = 0; for (int r = 0; r < nrej; r++) bad |= p == rej_pg && rej[r] == psp_read32(w + 0x90);
-            if (!bad && in && mx >= x0 && mx < x1 && my >= y0 && my < y1) { hit = w; hit_pg = p; }
+            if (!bad && in && mx >= x0 && mx < x1 && my >= y0 && my < y1) {   /* overlapping boxes (the conquest Purchase menu): the nearest centre */
+                const float dx = mx - (x0 + x1) * 0.5f, dy = my - (y0 + y1) * 0.5f, d = dx * dx + dy * dy;
+                if (!hit || d < hit_d) { hit = w; hit_pg = p; hit_d = d; } }
         }
     }
     int bare = 0;   /* no match running and no menu page (the conquest map): a click is Cross */
-    if (ui && g_player_soldier && f - g_soldier_frame > 120) g_player_soldier = 0;   /* a menu after the battle: its soldier no longer updates */
-    if (!ui && !g_player_soldier && f - g_soldier_frame > 30 && f - g_fly_frame > 30 && f - g_seat_any > 30) ui = bare = 1;
+    if (ui && g_player_soldier && f - g_soldier_frame > 120 && f - g_hum_frame > 120) g_player_soldier = 0;   /* a menu after the battle: its soldier no longer updates or reads its controls */
+    if (!ui && !g_player_soldier && f - g_soldier_frame > 30 && f - g_hum_frame > 30 && f - g_fly_frame > 30 && f - g_seat_any > 30) ui = bare = 1;
+    { static long other_f = -100, resume_f = -100; if (other) other_f = f; if (resume) resume_f = f;   /* the conquest menu drops its widgets some frames */
+      /* menu_back is Start (as in play) on the conquest map, 0x5CE844 3 or 4 zoomed, not its panels (5 Buy Troops, 2 pick a destination), and in its menu */
+      g_esc_on = ui && !tut && (f - resume_f <= 10 || (!inp && f - other_f > 10 && psp_read32(0x005CE844u) != 2 && psp_read32(0x005CE844u) != 5)); psp_ui_esc_start(g_esc_on); g_pages_live = npg; g_gc_menu = f - resume_f <= 10; }
     psp_ui_set(ui); g_in_ui = ui; g_tut_popup = tut; g_ctrl_page = ctrl;
-    { static long dchk; if (f - dchk > 30) { dchk = f; FILE *df = fopen("widgets.cmd", "rb");   /* debug: dump the live pages' widgets */
-        if (df) { fclose(df); remove("widgets.cmd");
+    { static long dchk; if (f - dchk > 10) { dchk = f; FILE *df = fopen("widgets.cmd", "rb");   /* debug: dump the live pages' widgets */
+        if (df) { fclose(df); remove("widgets.cmd"); FILE *wo = fopen("widgets.tmp", "w"); if (wo) {
           for (int i = 0; i < g_pgn; i++) { if (g_pg_frame[i] < f - 2) continue;
             const uint32_t p = g_pg[i], arr = psp_read32(p + 0x18), n = psp_read32(p + 0x1C) & 0xFFFF;
-            fprintf(stderr, "wdump page %08X n %u focus %08X\n", p, n, psp_read32(p + 0xA0));
+            fprintf(wo, "wdump page %08X n %u focus %08X\n", p, n, psp_read32(p + 0xA0));
             for (uint32_t k = 0; arr && k < n && k < 256; k++) { const uint32_t w = psp_read32(arr + 4 * k); if (!w) continue;
-              fprintf(stderr, "  w %08X type %X id %08X nav %X cc %08X rect %.1f %.1f %.1f %.1f\n", w, psp_read32(w + 4), psp_read32(w + 0x90), psp_read32(w + 0x98), psp_read32(w + 0xCC),
+              fprintf(wo, "  w %08X type %X id %08X nav %X cc %08X rect %.1f %.1f %.1f %.1f\n", w, psp_read32(w + 4), psp_read32(w + 0x90), psp_read32(w + 0x98), psp_read32(w + 0xCC),
                 psp_read_f32(w + 0x60), psp_read_f32(w + 0x64), psp_read_f32(w + 0x68), psp_read_f32(w + 0x6C));
-              if (psp_read32(w + 0x98) == 0xA || (getenv("SWBES_WDUMP0") && psp_read32(w + 0x98) == 0) || getenv("SWBES_WDUMPALL")) { fprintf(stderr, "   "); for (uint32_t o = 0; o < 0x300; o += 4) fprintf(stderr, "%08X%s", psp_read32(w + o), (o & 0x3C) == 0x3C ? "\n   " : " "); fprintf(stderr, "\n"); } } } } } }
+              if (psp_read32(w + 0x98) == 0xA || (getenv("SWBES_WDUMP0") && psp_read32(w + 0x98) == 0) || getenv("SWBES_WDUMPALL")) { fprintf(wo, "   "); for (uint32_t o = 0; o < 0x300; o += 4) fprintf(wo, "%08X%s", psp_read32(w + o), (o & 0x3C) == 0x3C ? "\n   " : " "); fprintf(wo, "\n"); } } } fclose(wo); remove("widgets.txt"); rename("widgets.tmp", "widgets.txt"); } } } }
     if (ui) {   /* the Scroll list icon (tex_post) follows keyboard / pad and the pad's style: redecode on a change, in menus only (a full redecode hitches) */
         static int was = -1; const int mode = psp_pad_last() ? 1 + psp_pad_style() : 0;
         if (mode != was) { if (was >= 0) psp_tex_refresh(); was = mode; } }
@@ -2065,7 +2156,7 @@ int main(int argc, char **argv) {
            m.base, m.entry, m.gp, m.nctors);
 
     { void psp_trace_watch(uint32_t, void (*)(uint32_t)); psp_trace_watch(0x002738A8u, mouse_look_hook); }
-    { extern int psp_direct_play; psp_direct_play = 1; binds_load(); psp_key_remap = key_remap; binds_menu(); void psp_trace_hook(uint32_t, void (*)(uint32_t)); psp_trace_hook(0x0009ED20u, page_tick); psp_trace_hook(0x000A5044u, gui_flush); psp_trace_hook(0x0012C330u, throw_key); psp_trace_hook(0x000B73D0u, ctl_get); psp_trace_hook(0x001E8788u, upg_update); psp_trace_hook(0x001EBE00u, upg_setstate); psp_trace_hook(0x0020E85Cu, vehicle_aim_hook); psp_trace_hook(0x002364D4u, flyer_hook); psp_trace_hook(0x000B9170u, con_print); psp_trace_hook(0x000F0A10u, text_keys_hook); psp_trace_hook(0x0009CDBCu, text_keys_hook); psp_trace_hook(0x0012CD38u, movie_hook); psp_trace_hook(0x003380ECu, glyph_code_hook); psp_trace_hook(0x00045C60u, glyph_hash_hook);
+    { extern int psp_direct_play; psp_direct_play = 1; binds_load(); psp_key_remap = key_remap; binds_menu(); void psp_trace_hook(uint32_t, void (*)(uint32_t)); psp_trace_hook(0x0009ED20u, page_tick); psp_trace_hook(0x0009E9E8u, page_input); psp_trace_hook(0x0033D7A4u, entry_guard); psp_trace_hook(0x000A5044u, gui_flush); psp_trace_hook(0x0012C330u, throw_key); psp_trace_hook(0x000B73D0u, ctl_get); psp_trace_hook(0x001E8788u, upg_update); psp_trace_hook(0x001EBE00u, upg_setstate); psp_trace_hook(0x0020E85Cu, vehicle_aim_hook); psp_trace_hook(0x002364D4u, flyer_hook); psp_trace_hook(0x000B9170u, con_print); psp_trace_hook(0x000F0A10u, text_keys_hook); psp_trace_hook(0x0009CDBCu, text_keys_hook); psp_trace_hook(0x0012CD38u, movie_hook); psp_trace_hook(0x003380ECu, glyph_code_hook); psp_trace_hook(0x00045C60u, glyph_hash_hook);
     }
     psp_tex_post = tex_post;
     psp_sprite_color = sprite_color;
@@ -2129,6 +2220,7 @@ int main(int argc, char **argv) {
                 fprintf(sf, "altctl %u %u\nframe %ld\nmode %s\nui %d\nsoldier %08X\nflyer_map %08X\nfly_obj %08X\npage %08X\nfocus %08X\nhum_map %08X\n",
                         psp_read32(0x005C85D0u), psp_read32(0x005C85D0u + 28), gf, mode, g_in_ui, g_player_soldier, g_fly_map, g_fly_obj, g_last_page, g_last_page ? psp_read32(g_last_page + 0xA0) : 0, g_hum_map);
                 fprintf(sf, "cycles %llu\n", gcyc);   /* game-thread CPU cycles at frame end (scripts/bench.ps1) */
+                fprintf(sf, "pages %d\nesc %d\ngcmenu %d\ngcstate %u\nwatch %d\ninpage %08X %ld n %u\n", g_pages_live, g_esc_on, g_gc_menu, psp_read32(0x005CE844u), gf - g_watch_frame < 30, g_in_pg, gf - g_in_pg_f, g_in_pg ? psp_read32(g_in_pg + 0x1C) & 0xFFFF : 0);   /* menu_back as Start; conquest menu / map state (3 map, 5 Buy Troops); SWBES_WATCHTXT drawn */
                 fclose(sf); remove("status.txt"); rename("status.tmp", "status.txt"); } } }
         if (!getenv("SWBES_VCLOCK")) {   /* game frame-time cap, seconds (see main); settings menu or fps.cmd "N" */
             const int f = psp_settings()->fps;

@@ -63,6 +63,7 @@ typedef struct {
     int veh_sens;     /* vehicle aim (ships, tanks, turrets, walkers), percent, on top of the mouse / stick one */} psp_settings_t;
 psp_settings_t *psp_settings(void);
 void psp_settings_save(void);
+void psp_settings_reload(void);   /* read [pc] again (settings.ini changed underneath) */
 int  psp_menu_open(void);
 
 /* Game controller, for game layers that drive play themselves: buttons in
@@ -105,6 +106,7 @@ void psp_window_view(int *w, int *h);   /* the size the frame is shown at (0 bef
  * menu is up. Then the mouse is a free pointer (no capture); clicks, right
  * clicks and wheel steps are counted for the game layer to take. */
 void psp_ui_set(int on);
+void psp_ui_esc_start(int on);   /* a menu with only prompts (a map): Esc presses Start, not Circle */
 /* Set by a game layer: the key bound to the window's default key vk (W, A, S, D, Q, E, R, F, P,
  * Tab, Enter, Esc, arrows, Shift, Ctrl); 0 = unbound. NULL: the defaults. */
 extern int (*psp_key_remap)(int vk);

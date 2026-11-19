@@ -87,6 +87,8 @@ static void bad_access(uint32_t addr, int write, int width) {
             fprintf(stderr, "  %-3s=0x%08X  %-3s=0x%08X  %-3s=0x%08X  %-3s=0x%08X\n",
                     N[i], psp_cpu.r[i], N[i+1], psp_cpu.r[i+1],
                     N[i+2], psp_cpu.r[i+2], N[i+3], psp_cpu.r[i+3]);
+        /* the memory as it was, for working out where the bad pointer came from */
+        FILE *rf = fopen("crash_ram.bin", "wb"); if (rf) { fwrite(psp_mem.ram, 1, PSP_RAM_SIZE, rf); fclose(rf); }
     }
     if (psp_mem_bad_access < 32)
         fprintf(stderr, "psprecomp: bad %s%d at 0x%08X (last fn 0x%08X)\n",

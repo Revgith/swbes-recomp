@@ -14,3 +14,4 @@ Versions are `MAJOR.MINOR.PATCH`. A hotfix bumps PATCH (0.1.0 -> 0.1.1).
    `gh release create v<version> dist\swbes-<version>*.* --title v<version> --notes-file <section>`
 
 Players update by extracting the new zip over their old folder. `game_data` (disc, eboot.elf, saves, settings, mods) is never in a release, so it is kept. A release must therefore keep reading older `settings.ini` files: new settings and binds fall back to their defaults.
+When a default bind changes, add it to `settings_migrate` in `games/swbes/host.c` and bump its `CUR`: a file stamped older moves a bind still at the old default to the new one.
