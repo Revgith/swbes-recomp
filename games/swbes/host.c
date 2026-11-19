@@ -407,10 +407,11 @@ static int hum_mapper(uint32_t m) {
  * its controller's mapper and turns them into angular velocity. The mouse
  * drives those channels with its own speed -- moving it turns the ship, at a
  * rate set by how fast it moves; still, the ship flies straight. */
-static uint32_t g_fly_map; static long g_fly_frame = -100; static int g_fly_use;
+static uint32_t g_fly_map; static long g_fly_frame = -100; static int g_fly_use, g_fly_board;
 static void flyer_hook(uint32_t addr) { (void)addr;
     const uint32_t ctl = psp_read32(psp_cpu.r[4] + 68), m = ctl ? psp_read32(ctl + 8) : 0;
     if (!m) return;   /* AI flyers have no input mapper */
+    if (psp_game_frames - g_fly_frame > 30) { g_use_pend = 0; g_fly_board = 1; }   /* just boarded: the E that got in must be let go before it can get out */
     g_fly_map = m; g_fly_frame = psp_game_frames; g_fly_obj = psp_cpu.r[4];
     if (g_fix_yaw != 0.0f && getenv("SWBES_VEHDBG")) { static long last; if (psp_game_frames - last >= 30) { last = psp_game_frames;
         fprintf(stderr, "fly turn in %.2f -> pitch %.3f yaw %.3f\n", g_fix_yaw, psp_read_f32(g_fly_obj + 736), psp_read_f32(g_fly_obj + 740)); } }
@@ -499,9 +500,10 @@ static void ctl_get2(uint32_t addr) { (void)addr;
     const int tur_upd = caller >= 0x00247200u && caller < 0x00247900u && !g_in_ui, walk = caller >= 0x00250800u && caller < 0x00250B00u && !g_in_ui;
     if ((caller >= 0x00247200u && caller < 0x00247900u) || (caller >= 0x00250800u && caller < 0x00250B00u)) g_seat_any = psp_game_frames;
     if (tur_upd || walk) {
+        static int was[2][8]; if (psp_game_frames - tur_frame > 30) { was[walk][0] = 1; g_use_pend = 0; }   /* just got in: the E that did it must be let go first */
         tur_frame = g_seat_frame = psp_game_frames;
         static const int T[2][8] = { { 7, 8, 9, 11, 12, 6, 15, 16 }, { 3, 4, 10, 6, 7, 5, -1, -1 } };   /* get out, seat, target, fire, secondary, hold, prev, next */
-        const int *c = T[walk]; static int was[2][8]; int on = 0, i;
+        const int *c = T[walk]; int on = 0, i;
         for (i = 0; i < 8 && c[i] != (int)ch; i++) {}
         if (i < 8) {
             const int d = i == 0 ? BIND_DOWN(B_USE) : i == 1 ? BIND_DOWN(B_SEAT) : i == 2 ? BIND_DOWN(B_TARGET) || BIND_DOWN(B_TSEARCH) : i == 3 ? fire_held()
@@ -518,11 +520,12 @@ static void ctl_get2(uint32_t addr) { (void)addr;
      * 6 = target lock; 7 = get out (up tap), read outside 0x2409D4, so matched by mapper. */
     static long gnd_frame = -100;
     const int gnd = caller >= 0x00240A00u && caller < 0x00240B20u && !g_in_ui;
-    if (gnd) { g_gnd_map = m; gnd_frame = psp_game_frames; }
+    static int gnd_was;   /* use held: get out on the next press, not the one that got in */
+    if (gnd) { if (psp_game_frames - gnd_frame > 30) { gnd_was = 1; g_use_pend = 0; } g_gnd_map = m; gnd_frame = psp_game_frames; }
     if (gnd && (long)ch == g_force_ch && psp_game_frames <= g_force_until) { psp_write_f32(psp_read32(m + 16) + 4 * ch, g_force_ch == 1 ? -1.0f : 1.0f); return; }   /* debug force */
-    if (ch == 7 && m == g_gnd_map && psp_game_frames - gnd_frame <= 2 && !g_in_ui) { static int was; const int u = BIND_DOWN(B_USE);   /* use: get out, on the press */
-        if (u && !was) { g_use_pend = 0; g_use_frame = -1;   /* this press is the exit: on foot it would re-enter */
-            psp_write_f32(psp_read32(m + 16) + 4 * ch, 1.0f); if (getenv("SWBES_VEHDBG")) fprintf(stderr, "ground vehicle: get out\n"); } was = u; }
+    if (ch == 7 && m == g_gnd_map && psp_game_frames - gnd_frame <= 2 && !g_in_ui) { const int u = BIND_DOWN(B_USE);   /* use: get out, on the press */
+        if (u && !gnd_was) { g_use_pend = 0; g_use_frame = -1;   /* this press is the exit: on foot it would re-enter */
+            psp_write_f32(psp_read32(m + 16) + 4 * ch, 1.0f); if (getenv("SWBES_VEHDBG")) fprintf(stderr, "ground vehicle: get out\n"); } gnd_was = u; }
     if (ch == 12 && m == g_gnd_map && psp_game_frames - gnd_frame <= 2 && !g_in_ui && BIND_DOWN(B_THROW))
         psp_write_f32(psp_read32(m + 16) + 4 * ch, 1.0f);   /* secondary fire (missiles): the PSP's down hold */
     if (ch == 4 && m == g_gnd_map && psp_game_frames - gnd_frame <= 2 && !g_in_ui && (BIND_DOWN(B_JUMP) || aim_held()))
@@ -540,6 +543,7 @@ static void ctl_get2(uint32_t addr) { (void)addr;
         if (getenv("SWBES_VEHDBG")) fprintf(stderr, "flyer ch18 (use) f%ld\n", psp_game_frames); } }
     if (fly && ch == 6) {   /* use: land / get out (d-pad up): on from the press while held, every reader sees it */
         static int on; const int u = BIND_DOWN(B_USE);
+        if (g_fly_board) { if (u) { g_use_pend = 0; on = 0; } else g_fly_board = 0; }   /* the press that boarded */
         if (g_use_pend) { g_use_pend = 0; on = 1; }   /* a tap shorter than a frame still gives one read */
         else if (!u) on = 0;
         g_fly_use = on;   /* ch 7 is read after 6 in the same update */
@@ -561,7 +565,7 @@ static void ctl_get2(uint32_t addr) { (void)addr;
         static long took = -1; static float v[2];
         if (took != psp_game_frames) { took = psp_game_frames;
             const psp_settings_t *st = psp_settings();
-            const float k = (float)st->sens_pct / 100.0f / 10.0f;   /* 10 px per frame = full turn */
+            const float k = (float)st->sens_pct / 100.0f * (float)st->veh_sens / 100.0f / 10.0f;   /* 10 px per frame = full turn */
             long dx, dy; psp_mouse_take(&dx, &dy);
             /* A virtual stick the mouse pushes and that eases back to centre:
              * raw per-frame deltas made the ship jerk on each tick and stop
@@ -584,7 +588,7 @@ static void ctl_get2(uint32_t addr) { (void)addr;
          * throttle here, through the PSP stick. */
         float ps = 0.0f;
         if (!psp_menu_open()) { const psp_pad_t *p = psp_pad(); const float a = ch == 0 ? p->rx : p->ry;
-            ps = a * fabsf(a) * 1.5f * (float)psp_settings()->pad_sens / 100.0f * (ch == 1 && psp_settings()->invert ? -1.0f : 1.0f); }
+            ps = a * fabsf(a) * 1.5f * (float)psp_settings()->pad_sens / 100.0f * (float)psp_settings()->veh_sens / 100.0f * (ch == 1 && psp_settings()->invert ? -1.0f : 1.0f); }
         if (walk && ch == 1) { walk_pitch = (v[1] + ps) * 3.0f;   /* same sign as 1 (a minus inverted it); 11 turns slowly, so 3x */   /* W / S, left stick: drive */
             const float d = (float)(BIND_DOWN(B_FWD) - BIND_DOWN(B_BACK)) + (psp_menu_open() ? 0.0f : psp_pad()->ly);
             if (d != 0.0f) psp_write_f32(psp_read32(m + 16) + 4, d > 1.0f ? 1.0f : d < -1.0f ? -1.0f : d);
@@ -1631,10 +1635,10 @@ static void vehicle_aim_hook(uint32_t addr) {
     const uint32_t v = psp_cpu.r[4], ctl = psp_read32(v + 68);
     if (!ctl || !psp_read32(ctl + 8) || g_in_ui) return;
     const psp_settings_t *st = psp_settings();
-    const float sens = 0.0025f * (float)st->sens_pct / 100.0f, inv = st->invert ? -1.0f : 1.0f;
+    const float vk = (float)psp_settings()->veh_sens / 100.0f, sens = 0.0025f * (float)st->sens_pct / 100.0f * vk, inv = st->invert ? -1.0f : 1.0f;
     long dx, dy; psp_mouse_take(&dx, &dy);
     static LARGE_INTEGER t_last; float sy, sp; pad_aim(&sy, &sp, frame_dt(&t_last));   /* right stick */
-    if (g_in_ui) sy = sp = 0.0f;
+    if (g_in_ui) sy = sp = 0.0f; sy *= vk; sp *= vk;
     if (getenv("SWBES_VEHDBG")) { static long n; if (n++ % 60 == 0) fprintf(stderr, "vehicle %08X ctl %08X pitch %.3f yaw %.3f\n", v, ctl, psp_read_f32(v + 468), psp_read_f32(v + 472)); }
     if (!dx && !dy && sy == 0.0f && sp == 0.0f) return;
     psp_write_f32(v + 472, psp_read_f32(v + 472) + (float)dx * sens + sy);

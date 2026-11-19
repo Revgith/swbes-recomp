@@ -59,7 +59,8 @@ typedef struct {
     int pad_sens;     /* controller stick aim speed, percent of the default */
     int prompts;      /* button prompts: 0 auto (last used device), 1 keyboard, 2 + PSP_STYLE_* forced */
     int filter;       /* the game's lavender colour filter (render_gl.c glow_sharp): 0 off, 1 on */
-    int filter_blur;  /* 1: soft, as the PSP's quarter-size pass; 0: per pixel */} psp_settings_t;
+    int filter_blur;  /* 1: soft, as the PSP's quarter-size pass; 0: per pixel */
+    int veh_sens;     /* vehicle aim (ships, tanks, turrets, walkers), percent, on top of the mouse / stick one */} psp_settings_t;
 psp_settings_t *psp_settings(void);
 void psp_settings_save(void);
 int  psp_menu_open(void);

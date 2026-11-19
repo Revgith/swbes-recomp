@@ -184,6 +184,7 @@ static void options(psp_settings_t *s) {
       row("Frame rate"); if (combo("##fps", &k, NFPS, fps_name)) { s->fps = FPS_OPT[k]; ch = true; } }
     row("Mouse sensitivity"); ch |= sens("##sens", &s->sens_pct);
     row("Stick sensitivity"); ch |= sens("##pads", &s->pad_sens);
+    row("Vehicle sensitivity"); ch |= sens("##vehs", &s->veh_sens);
     row("Invert look"); ch |= check("##inv", &s->invert);
     row("Aim assist"); ch |= check("##aim", &s->aim_assist);
     { int k = clampi(s->prompts, 0, NPROMPT - 1); row("Button prompts"); if (combo("##prompts", &k, NPROMPT, prompt_name)) { s->prompts = k; ch = true; } }

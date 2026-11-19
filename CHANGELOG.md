@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.3
+
+- Vehicles: getting in or out no longer needs a second press.
+- Options: Vehicle sensitivity, for ship, tank, turret and walker aim.
+
 ## 0.1.2
 
 - Galactic Conquest: the map moves on from Finance to Purchase (a recompiler bug skipped an instruction).

@@ -290,14 +290,14 @@ static uint32_t pad(uint8_t *ax, uint8_t *ay) {
 
 /* ---- PC settings (see window.h) ------------------------------------- */
 static psp_settings_t g_set;
-static const psp_settings_t g_def = { 60, 100, 0, 100, 0, 0, 0, 0, 0, 1, 0, 100, 0, 0, 1 };
+static const psp_settings_t g_def = { 60, 100, 0, 100, 0, 0, 0, 0, 0, 1, 0, 100, 0, 0, 1, 100 };
 static const char *ini_path(void) {
     static char p[MAX_PATH];
     if (!p[0]) { GetCurrentDirectoryA(MAX_PATH - 16, p); strcat(p, "\\settings.ini"); }
     return p;
 }
 const char *psp_ini_path(void) { return ini_path(); }
-#define SET_FIELDS(X) X(fps) X(sens_pct) X(invert) X(volume) X(smooth) X(fullscreen) X(show_fps) X(tex_filter) X(ui_filter) X(aim_assist) X(res_scale) X(pad_sens) X(prompts) X(filter) X(filter_blur)
+#define SET_FIELDS(X) X(fps) X(sens_pct) X(invert) X(volume) X(smooth) X(fullscreen) X(show_fps) X(tex_filter) X(ui_filter) X(aim_assist) X(res_scale) X(pad_sens) X(prompts) X(filter) X(filter_blur) X(veh_sens)
 psp_settings_t *psp_settings(void) {
     static volatile LONG loaded;
     if (!loaded) {
