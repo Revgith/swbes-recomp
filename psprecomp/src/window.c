@@ -638,7 +638,8 @@ static volatile LONG g_kicked;
  * it and samples input right away instead of on its next 16 ms timer tick,
  * which added up to a frame of lag and jitter to both. */
 void psp_window_kick(void) {
-    if (g_hwnd && !InterlockedExchange(&g_kicked, 1)) PostMessageA(g_hwnd, WM_APP + 7, 0, 0);
+    /* not while the menu is open: posted messages go before input, so a paint as slow as a frame would starve its clicks; the timer drives it */
+    if (g_hwnd && !g_menu && !InterlockedExchange(&g_kicked, 1)) PostMessageA(g_hwnd, WM_APP + 7, 0, 0);
 }
 
 static LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
