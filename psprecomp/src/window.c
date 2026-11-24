@@ -327,7 +327,7 @@ void psp_settings_save(void) {
 /* ---- PC menu: state for ui.cpp, which draws it ------------------------- */
 volatile unsigned long long psp_game_cycles;
 volatile long psp_game_frames;           /* bumped per game frame (display.c) */
-static int g_menu, g_fps_shown;
+static int g_menu, g_fps_shown; static double g_ui_ms;   /* PSPRECOMP_PAINTBENCH: time in ui_frame */
 int psp_menu_open(void) { return g_menu; }
 int psp_window_height(void) { RECT c; if (!g_hwnd || !GetClientRect(g_hwnd, &c)) return 272; return c.bottom; }
 static const psp_bind_t *g_binds; static int g_nbinds;
@@ -529,7 +529,8 @@ static void compose(HDC dc, uint32_t *px, int cw, int ch) {
     }
     drawn:
     GdiFlush();
-    ui_frame(g_hwnd, px, cw, ch);   /* FPS, errors, the PC menu */
+    { LARGE_INTEGER a, b, fq; QueryPerformanceCounter(&a); ui_frame(g_hwnd, px, cw, ch); QueryPerformanceCounter(&b); QueryPerformanceFrequency(&fq);   /* FPS, errors, the PC menu */
+      g_ui_ms += (double)(b.QuadPart - a.QuadPart) / fq.QuadPart * 1e3; }
 }
 /* A top-down 32-bit DIB section of w x h selected into a memory DC: GDI and
  * ui.cpp both draw into its pixels. */
@@ -566,7 +567,7 @@ static void paint_bench(void) {
     compose(dc, bpx, bw, bh); GdiFlush();
     QueryPerformanceCounter(&b); QueryPerformanceFrequency(&f);
     tsum += (double)(b.QuadPart - a.QuadPart) / f.QuadPart * 1e3;
-    if (++n == 300) { fprintf(stderr, "paint: %.3f ms avg at %dx%d\n", tsum / n, bw, bh); tsum = 0; n = 0; }
+    if (++n >= (g_menu ? 120 : 300)) { fprintf(stderr, "paint: %.3f ms avg at %dx%d%s (ui %.3f)\n", tsum / n, bw, bh, g_menu ? " (menu)" : "", g_ui_ms / n); tsum = 0; n = 0; g_ui_ms = 0; }
     if (GetFileAttributesA("winshot.cmd") != INVALID_FILE_ATTRIBUTES) {   /* test hook: the composed window (menu included) -> winshot.bmp */
         DeleteFileA("winshot.cmd");
         BITMAPINFO bi = { { sizeof(BITMAPINFOHEADER), bw, -bh, 1, 32, BI_RGB } };
@@ -646,10 +647,21 @@ static LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     if (g_menu && ui_capt < 0 && ((msg >= WM_MOUSEFIRST && msg <= WM_MOUSELAST) || (msg >= WM_KEYFIRST && msg <= WM_KEYLAST) || msg == WM_SETFOCUS || msg == WM_KILLFOCUS))
         ui_wndproc(h, msg, wp, lp);   /* the menu (ImGui) sees input first; a bind waiting for a key does not share it */
     switch (msg) {
-    case WM_APP + 7:   /* a new frame was latched (psp_window_kick): show it and sample input now */
-        InterlockedExchange(&g_kicked, 0); paint_bench();
+    case WM_APP + 7: {   /* a new frame was latched (psp_window_kick): show it and sample input now */
+        /* Posted messages go before input. When a paint takes longer than a
+         * frame (a large window), the next kick is always waiting and mouse /
+         * keys starved: clicks landed seconds late or not at all. Input that
+         * is waiting goes first. */
+        MSG im; for (int k = 0; k < 64 && PeekMessageA(&im, h, 0, 0, PM_REMOVE | PM_QS_INPUT); k++) { TranslateMessage(&im); DispatchMessageA(&im); }
+        InterlockedExchange(&g_kicked, 0); paint_bench(); }
         /* fall through */
     case WM_TIMER: {
+        {   /* test hook: menu.cmd toggles the PC menu (looked for only when the run folder changed, at most 4 times a second) */
+            static ULONGLONG next; static unsigned seen; extern int psp_cmd_changed(unsigned *); const ULONGLONG t = GetTickCount64();
+            if (t >= next) { next = t + 250; if (psp_cmd_changed(&seen) && DeleteFileA("menu.cmd")) menu_set(h, !g_menu); } }
+        if (msg == WM_TIMER) {
+            if (g_menu) paint_bench();   /* no frame kicks while it is open */
+        }
         uint8_t ax = 128, ay = 128;
         uint32_t b = pad(&ax, &ay);
         if (GetForegroundWindow() == h || g_nfake) b |= keyboard(&ax, &ay);   /* keys only when focused */

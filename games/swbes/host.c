@@ -1186,9 +1186,11 @@ static const uint32_t *tex_post(const uint32_t *px, int w, int h, int *ow, int *
                 char fn[48]; snprintf(fn, sizeof fn, "sheet_%d_%08X.ppm", n, hs); FILE *o = fopen(fn, "rb");
                 if (o) fclose(o); else if ((o = fopen(fn, "wb")) != NULL) { fprintf(o, "P6\n256 256\n255\n");   /* debug: each 256x256 sheet once, over grey */
                     for (int k = 0; k < 65536; k++) { const uint32_t c = px[k], a = c >> 24; for (int j = 0; j < 3; j++) fputc((int)(((c >> (8 * j) & 255) * a + 90 * (255 - a)) / 255), o); } fclose(o); } }
-            if (n == 21457) { enum { S = 4 }; static uint32_t src[256 * 256], big[256 * S * 256 * S]; static int have = -1;
+            if (n == 21457) { enum { S = 4 }; static uint32_t src[256 * 256], big[256 * S * 256 * S]; static int have = -1; static char keys[128];
                 const int mode = psp_pad_last() ? 1 + psp_pad_style() : 0;   /* the icon follows the input in use (scroll_icon_watch redecodes on a change) */
-                if (have != mode || memcmp(src, px, sizeof src)) {   /* drawn once per sheet and input */
+                char lrk[128]; snprintf(lrk, sizeof lrk, "%s|%s", g_bind[B_NAV_LEFT].name, g_bind[B_NAV_RIGHT].name);
+                if (have != mode || strcmp(keys, lrk) || memcmp(src, px, sizeof src)) {   /* drawn once per sheet, input and menu left / right keys */
+                    strcpy(keys, lrk);
                     memcpy(src, px, sizeof src); have = mode;
                     for (int y = 0; y < h * S; y++) for (int x = 0; x < w * S; x++) big[y * w * S + x] = px[(y / S) * w + x / S];
                     for (int y = 223 * S; y < 256 * S; y++) for (int x = 46 * S; x < 80 * S; x++) big[y * w * S + x] = 0;
@@ -1198,6 +1200,12 @@ static const uint32_t *tex_post(const uint32_t *px, int w, int h, int *ow, int *
                     for (int y = 72 * S; y < 105 * S; y++) for (int x = 145 * S; x < 179 * S; x++) big[y * w * S + x] = 0;
                     if (mode) pad_glyph(big, w * S, 145 * S, 72 * S, 33 * S, PG_DPAD, mode - 1);   /* drawn smaller on screen than the icon sheet's: the whole cell */
                     else keycap(big, w * S, 148 * S, 77 * S, 28 * S, 24 * S, "✥");
+                    /* the scoreboard's "Change Team" left / right d-pad (179,72 - 213,105): the menu left / right keys, or the pad's d-pad */
+                    for (int y = 72 * S; y < 105 * S; y++) for (int x = 179 * S; x < 213 * S; x++) big[y * w * S + x] = 0;
+                    if (mode) pad_glyph(big, w * S, 179 * S, 72 * S, 33 * S, PG_DPAD, mode - 1);
+                    else { const char *l = g_bind[B_NAV_LEFT].name, *r = g_bind[B_NAV_RIGHT].name; char lr[64];
+                        if (!strcmp(l, "Left") && !strcmp(r, "Right")) snprintf(lr, sizeof lr, "↔"); else snprintf(lr, sizeof lr, "%s/%s", l, r);
+                        keycap(big, w * S, 182 * S, 77 * S, 28 * S, 24 * S, lr); }
                     if (getenv("SWBES_DUMPHUD")) { FILE *o = fopen("hudcap.ppm", "wb");   /* debug: the Navigate cap as drawn, over the HUD blue */
                         if (o) { fprintf(o, "P6\n%d %d\n255\n", 40 * S, 40 * S); for (int y = 70 * S; y < 110 * S; y++) for (int x = 142 * S; x < 182 * S; x++) { const uint32_t c = big[y * w * S + x], a = c >> 24;
                             const int bg[3] = { 0x18, 0x50, 0x80 }; for (int j = 0; j < 3; j++) fputc((int)(((c >> (8 * j) & 255) * a + bg[j] * (255 - a)) / 255), o); } fclose(o); } } }   /* 26 texels: on screen, the height of the other caps */   /* drawn untinted: sprite_color */
@@ -1217,6 +1225,7 @@ static uint32_t sprite_color(int tw, int th, float u0, float v0, float u1, float
     if (tw == 256 && th == 128 && u0 >= 100 && u1 <= 216 && !psp)   /* icon sheet d-pads: the game tints them blue; our caps carry their own colours */
         return (rgba & 0xFF000000u) | 0xFFFFFFu;
     if (tw == 256 && th == 256 && u0 == 145 && v0 == 72 && u1 == 179 && v1 == 105 && !psp) return 0xFFFFFFFFu;   /* the map's Navigate d-pad: the game draws it at 76% */
+    if (tw == 256 && th == 256 && u0 == 179 && v0 == 72 && u1 == 213 && v1 == 105 && !psp) return 0xFFFFFFFFu;   /* the scoreboard's Change Team d-pad: our cap has its own colours */
     if (tw != 256 || th != 256 || u0 != 46 || v0 != 223 || u1 != 80 || v1 != 256) return rgba;
     return psp ? rgba : (rgba & 0xFF000000u) | 0xFFFFFFu;
 }
@@ -1715,7 +1724,7 @@ static void vehicle_aim_hook(uint32_t addr) {
  * pair the d-pad posts. A page's update (0x9ED20) runs once per frame while it
  * is up; that tells us which pages are on screen. Clicking focuses the button
  * and then presses Cross, so the game's own select logic and sounds run. */
-/* SWBES_QM_MAP=<index>[,era,mode]: quick match on a chosen map instead of a
+/* SWBES_QM_MAP=<index>[,era,mode[,variant]]: quick match on a chosen map instead of a
  * random one. Does what SWB.FE.SelectRandomMaps (0x2E8A00) does with its dice
  * fixed: the map is the index-th node of the list at 0x5C7EDC (node +0 the
  * map, +8 the next node), era 0..4 and mode 0..1 are checked by 0x1D8ECC,
@@ -1745,8 +1754,8 @@ static void qm_strings(uint32_t a, int depth) {   /* print ASCII strings at / po
 static int qm_pick_map(void) {
     const char *e = getenv("SWBES_QM_MAP");
     const uint32_t lst = 0x005C7EDCu, cnt = psp_read32(lst + 16);
-    int want = -1, era = -1, mode = -1;
-    if (e) sscanf(e, "%d,%d,%d", &want, &era, &mode);
+    int want = -1, era = -1, mode = -1, vr = -1;
+    if (e) sscanf(e, "%d,%d,%d,%d", &want, &era, &mode, &vr);
     uint32_t node = psp_read32(lst), map = 0;
     for (uint32_t i = 0; node && i < cnt && i < 64; i++, node = psp_read32(node + 8)) {
         const uint32_t m = psp_read32(node);
@@ -1758,6 +1767,7 @@ static int qm_pick_map(void) {
         if ((era >= 0 && er != era) || (mode >= 0 && mo != mode)) continue;
         if (!game_call(0x001D8ECCu, map, (uint32_t)er, (uint32_t)mo)) continue;
         for (uint32_t var = 2; var <= 8; var <<= 1) {
+            if (vr >= 0 && var != (uint32_t)vr) continue;
             if (!game_call5(0x001D8F68u, map, (uint32_t)er, (uint32_t)mo, var, 0)) continue;
             psp_write32(0x005CE2F4u, map); psp_write32(0x0045214Cu, (uint32_t)er);
             psp_write32(0x00452150u, (uint32_t)mo); psp_write32(0x005CE2F8u, var);
@@ -1839,6 +1849,24 @@ static void gui_flush(uint32_t addr) {
         psp_write32(0x00463624u, n + 1);
     }
     g_nev = 0;
+}
+/* Left / right arrow buttons (Select A Hero's, the campaign's era arrows): the
+ * page reads the d-pad, so activating the button does nothing. Found by shape,
+ * not id: a small button whose id +- 1 is a button of the same size on the
+ * same page, level with it and at least 250 px across the screen. Returns 0x80 (d-pad left) for the
+ * left one, 0x20 (right) for the right one, else 0. */
+static uint32_t arrow_dir(uint32_t pg, uint32_t w) {
+    const uint32_t arr = psp_read32(pg + 0x18), n = psp_read32(pg + 0x1C) & 0xFFFF, id = psp_read32(w + 0x90);
+    const float x0 = psp_read_f32(w + 0x60), y0 = psp_read_f32(w + 0x64), x1 = psp_read_f32(w + 0x68), y1 = psp_read_f32(w + 0x6C);
+    if (!arr || n > 256 || x1 - x0 > 40.0f || y1 - y0 > 40.0f || x1 - x0 < 2.0f) return 0;
+    for (uint32_t k = 0; k < n; k++) { const uint32_t o = psp_read32(arr + 4 * k);
+        if (!o || o == w || psp_read32(o + 4) != 0x7D1 || (psp_read32(o + 0x90) != id + 1 && psp_read32(o + 0x90) != id - 1)) continue;
+        const float a0 = psp_read_f32(o + 0x60), b0 = psp_read_f32(o + 0x64), a1 = psp_read_f32(o + 0x68), b1 = psp_read_f32(o + 0x6C);
+        if (fabsf((a1 - a0) - (x1 - x0)) > 1.0f || fabsf((b1 - b0) - (y1 - y0)) > 1.0f) continue;
+        const float d = (a0 + a1) - (x0 + x1), dy = (b0 + b1) - (y0 + y1);   /* twice the centres' distance */
+        if (fabsf(dy) > 32.0f) continue;   /* level: not two spawn-map command posts */
+        if (d > 500.0f) return 0x80u; if (d < -500.0f) return 0x20u; }
+    return 0;
 }
 static void menu_mouse(void) {
     static long last = -1; const long f = psp_game_frames;
@@ -1968,7 +1996,8 @@ static void menu_mouse(void) {
             ui = other = 1;
             const float x0 = psp_read_f32(w + 0x60), y0 = psp_read_f32(w + 0x64), x1 = psp_read_f32(w + 0x68), y1 = psp_read_f32(w + 0x6C);
             int bad = 0; for (int r = 0; r < nrej; r++) bad |= p == rej_pg && rej[r] == psp_read32(w + 0x90);
-            if (!bad && in && mx >= x0 && mx < x1 && my >= y0 && my < y1) {   /* overlapping boxes (the conquest Purchase menu): the nearest centre */
+            const float pad = arrow_dir(p, w) ? 4.0f : 0.0f;   /* thin left / right arrows */
+            if (!bad && in && mx >= x0 - pad && mx < x1 + pad && my >= y0 - pad && my < y1 + pad) {   /* overlapping boxes (the conquest Purchase menu): the nearest centre */
                 const float dx = mx - (x0 + x1) * 0.5f, dy = my - (y0 + y1) * 0.5f, d = dx * dx + dy * dy;
                 if (!hit || d < hit_d) { hit = w; hit_pg = p; hit_d = d; } }
         }
@@ -1986,8 +2015,8 @@ static void menu_mouse(void) {
             const uint32_t p = g_pg[i], arr = psp_read32(p + 0x18), n = psp_read32(p + 0x1C) & 0xFFFF;
             fprintf(wo, "wdump page %08X n %u focus %08X\n", p, n, psp_read32(p + 0xA0));
             for (uint32_t k = 0; arr && k < n && k < 256; k++) { const uint32_t w = psp_read32(arr + 4 * k); if (!w) continue;
-              fprintf(wo, "  w %08X type %X id %08X nav %X cc %08X rect %.1f %.1f %.1f %.1f\n", w, psp_read32(w + 4), psp_read32(w + 0x90), psp_read32(w + 0x98), psp_read32(w + 0xCC),
-                psp_read_f32(w + 0x60), psp_read_f32(w + 0x64), psp_read_f32(w + 0x68), psp_read_f32(w + 0x6C));
+              fprintf(wo, "  w %08X type %X id %08X nav %X cc %08X rect %.1f %.1f %.1f %.1f%s\n", w, psp_read32(w + 4), psp_read32(w + 0x90), psp_read32(w + 0x98), psp_read32(w + 0xCC),
+                psp_read_f32(w + 0x60), psp_read_f32(w + 0x64), psp_read_f32(w + 0x68), psp_read_f32(w + 0x6C), psp_read32(w + 4) == 0x7D1 && arrow_dir(p, w) ? (arrow_dir(p, w) == 0x80u ? " arrow L" : " arrow R") : "");
               if (psp_read32(w + 0x98) == 0xA || (getenv("SWBES_WDUMP0") && psp_read32(w + 0x98) == 0) || getenv("SWBES_WDUMPALL")) { fprintf(wo, "   "); for (uint32_t o = 0; o < 0x300; o += 4) fprintf(wo, "%08X%s", psp_read32(w + o), (o & 0x3C) == 0x3C ? "\n   " : " "); fprintf(wo, "\n"); } } } fclose(wo); remove("widgets.txt"); rename("widgets.tmp", "widgets.txt"); } } } }
     if (ui) {   /* the Scroll list icon (tex_post) follows keyboard / pad and the pad's style: redecode on a change, in menus only (a full redecode hitches) */
         static int was = -1; const int mode = psp_pad_last() ? 1 + psp_pad_style() : 0;
@@ -2006,9 +2035,9 @@ static void menu_mouse(void) {
     int clicks, rclicks, wheel, moved; psp_ui_take(&clicks, &rclicks, &wheel, &moved);
     if (!ui) { if (wheel) { if (aim_held()) g_zoom_wheel = wheel > 0 ? 1 : -1; else if (g_bind[B_CYCLE1].vk == VK_WHEEL) g_play_wheel = 1; } return; }   /* RMB held: the wheel steps the scope */
     if (getenv("SWBES_HITLOG") && (moved || clicks)) fprintf(stderr, "hit %08X pg %08X lst %08X pg %08X modal %08X\n", hit ? psp_read32(hit + 0x90) : 0, hit_pg, lst ? psp_read32(lst + 0x90) : 0, lst_pg, modal);
-    {   /* the campaign era arrows: focusing one empties the mission panel; a click steps the d-pad to the previous / next mission */
-        const uint32_t hid = hit ? psp_read32(hit + 0x90) : 0;
-        if (hid == 0xA79AB4E7u || hid == 0xA79AB4E8u) { if (clicks) psp_ctrl_pulse(hid == 0xA79AB4E7u ? 0x80u : 0x20u, 0, 3); hit = 0; clicks = 0; } }
+    {   /* left / right arrows: never focused (the campaign's empties its mission panel); a click steps the d-pad */
+        const uint32_t dir = hit ? arrow_dir(hit_pg, hit) : 0;
+        if (dir) { if (clicks) psp_ctrl_pulse(dir, 0, 3); hit = 0; clicks = 0; } }
     if (hit && (moved || clicks)) {
         const uint32_t id = psp_read32(hit + 0x90), cur = psp_read32(hit_pg + 0xA0);
         if (id != cur) { gui_post(4, id, cur); if (cur) gui_post(5, cur, cur);

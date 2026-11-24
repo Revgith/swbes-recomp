@@ -67,6 +67,36 @@ static void tri(uint32_t *px, int pitch, const ImDrawVert *a, const ImDrawVert *
         }
     }
 }
+/* ImGui's filled rectangles (panels, frames, the menu's background): two
+ * triangles a b c, a c d over one axis-aligned quad, one colour, one texel.
+ * Filled a row at a time, the same pixels tri() would cover (centres inside,
+ * left / top edges in, right / bottom out); 0 when the pair is not such a quad. */
+static bool rect(uint32_t *px, int pitch, const ImDrawVert *vb, const ImDrawIdx *t, int cl, int ct, int cr, int cb) {
+    if (t[3] != t[0] || t[4] != t[2]) return false;
+    const ImDrawVert *a = vb + t[0], *b = vb + t[1], *c = vb + t[2], *d = vb + t[5];
+    if (a->col != b->col || a->col != c->col || a->col != d->col) return false;
+    if (a->uv.x != b->uv.x || a->uv.x != c->uv.x || a->uv.x != d->uv.x || a->uv.y != b->uv.y || a->uv.y != c->uv.y || a->uv.y != d->uv.y) return false;
+    const bool h = a->pos.y == b->pos.y && b->pos.x == c->pos.x && c->pos.y == d->pos.y && d->pos.x == a->pos.x;
+    const bool v = a->pos.x == b->pos.x && b->pos.y == c->pos.y && c->pos.x == d->pos.x && d->pos.y == a->pos.y;
+    if (!h && !v) return false;
+    const float fx0 = ImMin(a->pos.x, c->pos.x), fx1 = ImMax(a->pos.x, c->pos.x), fy0 = ImMin(a->pos.y, c->pos.y), fy1 = ImMax(a->pos.y, c->pos.y);
+    int x0 = (int)ceilf(fx0 - 0.5f), x1 = (int)ceilf(fx1 - 0.5f), y0 = (int)ceilf(fy0 - 0.5f), y1 = (int)ceilf(fy1 - 0.5f);
+    if (x0 < cl) x0 = cl; if (y0 < ct) y0 = ct; if (x1 > cr) x1 = cr; if (y1 > cb) y1 = cb;
+    int tx = 255;
+    if (g_tex) { int u = (int)(a->uv.x * g_tw), q = (int)(a->uv.y * g_th); u = u < 0 ? 0 : u >= g_tw ? g_tw - 1 : u; q = q < 0 ? 0 : q >= g_th ? g_th - 1 : q; tx = g_tex[q * g_tw + u]; }
+    const int r = a->col & 255, g = a->col >> 8 & 255, bl = a->col >> 16 & 255;
+    const int A = (int)((float)(a->col >> 24) * tx / 255.0f + 0.5f);
+    if (A <= 0 || x0 >= x1 || y0 >= y1) return true;
+    for (int y = y0; y < y1; y++) {
+        uint32_t *row = px + (size_t)y * pitch;
+        for (int x = x0; x < x1; x++) {
+            uint32_t &o = row[x];
+            const int dr = o >> 16 & 255, dg = o >> 8 & 255, db = o & 255;
+            o = 0xFF000000u | (uint32_t)(dr + ((r - dr) * A + 127) / 255) << 16 | (uint32_t)(dg + ((g - dg) * A + 127) / 255) << 8 | (uint32_t)(db + ((bl - db) * A + 127) / 255);
+        }
+    }
+    return true;
+}
 static void raster(uint32_t *px, int w, int h, const ImDrawData *dd) {
     for (int n = 0; n < dd->CmdListsCount; n++) {
         const ImDrawList *l = dd->CmdLists[n];
@@ -78,6 +108,7 @@ static void raster(uint32_t *px, int w, int h, const ImDrawData *dd) {
             if (cl >= cr || ct >= cb) continue;
             for (unsigned k = 0; k + 2 < c.ElemCount; k += 3) {
                 const ImDrawIdx *t = ib + c.IdxOffset + k;
+                if (k + 5 < c.ElemCount && rect(px, w, vb + c.VtxOffset, t, cl, ct, cr, cb)) { k += 3; continue; }
                 tri(px, w, vb + c.VtxOffset + t[0], vb + c.VtxOffset + t[1], vb + c.VtxOffset + t[2], cl, ct, cr, cb);
             }
         }

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.5
+
+- F1 menu: clicks and keys no longer lag or get lost in large windows (#3); the menu draws faster.
+- Scoreboard: the Change Team prompt shows the arrow keys, or the controller's d-pad.
+- Select A Hero and the campaign: the left / right arrows can be clicked.
+
 ## 0.1.4
 
 This is the last update for a while.
