@@ -44,6 +44,7 @@ add_library(psprecomp STATIC
     src/traps.c
     src/window.c
     src/mods.c
+    src/font.c
     src/movie.c
     src/envcache.c
     src/prof.c

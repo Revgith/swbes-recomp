@@ -51,7 +51,9 @@ static void grow(void) {
     g_cap = ncap;
 }
 
+uint32_t psp_dispatch_gen = 1;   /* bumped on any table change: invalidates the call-site caches */
 void psp_register(uint32_t addr, psp_fn_t fn) {
+    psp_dispatch_gen++;
     if (!g_table || (g_count + 1) * 4 >= g_cap * 3) grow();   /* keep load < 0.75 */
     if (!g_table) return;
 
@@ -72,6 +74,7 @@ void psp_register(uint32_t addr, psp_fn_t fn) {
  * function entry runs the whole function, a label thunk enters partway through,
  * and if an address is both then the entry is the correct answer. */
 void psp_register_label(uint32_t addr, psp_fn_t fn) {
+    psp_dispatch_gen++;
     if (!g_table || (g_count + 1) * 4 >= g_cap * 3) grow();
     if (!g_table) return;
 
@@ -129,7 +132,11 @@ void psp_trace_watch(uint32_t addr, void (*fn)(uint32_t)) {
 static struct { uint32_t addr; void (*fn)(uint32_t); } g_hooks[32];
 static int g_nhooks;
 uint32_t psp_trace_hook_bits[128];
+int psp_trace_skip;
 #define g_hook_bits psp_trace_hook_bits
+uint32_t psp_post_ra, psp_post_sp;
+void (*psp_post_fn)(void);
+void psp_post_run(void) { psp_post_ra = 0; if (psp_post_fn && psp_cpu.r[29] == psp_post_sp) psp_post_fn(); }   /* same frame: not a later call returning to the same site */
 void psp_trace_hook(uint32_t addr, void (*fn)(uint32_t)) {
     if (g_nhooks >= 32) { fprintf(stderr, "psp_trace_hook: table full, %08X dropped\n", addr); return; }
     g_hooks[g_nhooks].addr = addr; g_hooks[g_nhooks].fn = fn; g_nhooks++;
@@ -264,7 +271,7 @@ uint64_t psp_dispatch_misses(void) { return g_misses; }
 void psp_dispatch_reset(void) {
     free(g_table);
     g_table = NULL;
-    g_cap = g_count = 0;
+    g_cap = g_count = 0; psp_dispatch_gen++;
     g_misses = 0;
     g_miss = NULL;
 }
@@ -481,3 +488,10 @@ void psp_trace_sp_call(uint32_t callee, uint32_t sp_before, uint32_t sp_after) {
     g_spc_bad++;
 }
 uint64_t psp_sp_call_violations(void) { return g_spc_bad; }
+
+/* Call-site cache miss (PSP_DISPATCH_CACHED): dispatch, and remember the target if it resolved. */
+void psp_dispatch_fill(uint32_t addr, uint32_t *ca, psp_fn_t *cf, uint32_t *cg) {
+    const psp_fn_t fn = psp_lookup(addr);
+    if (fn) { *ca = addr; *cf = fn; *cg = psp_dispatch_gen; }
+    psp_dispatch(addr);
+}

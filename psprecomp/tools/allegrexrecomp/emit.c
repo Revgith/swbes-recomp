@@ -54,6 +54,86 @@ static void emit_vinline(FILE *f, const char *ind, int kind, unsigned vd, unsign
     fprintf(f, " } else %s\n", slow);
 }
 
+/* A lane-wise op inline from an expression: '$' is the vs lane, '#' the vt lane (lane 0 when
+ * tn is 1). Same guard and read-before-write as emit_vinline. */
+static void emit_vexpr(FILE *f, const char *ind, unsigned vd, unsigned vs, unsigned vt, int n, int tn,
+                       const char *expr, const char *slow) {
+    int d[4], s[4], t[4];
+    vlanes(vd, n, d); vlanes(vs, n, s); vlanes(vt, tn ? tn : 1, t);
+    fprintf(f, "%sif (!psp_vfpu_pfx) {", ind);
+    for (int i = 0; i < n; i++) fprintf(f, " const float _s%d = psp_cpu.v[%d];", i, s[i]);
+    if (tn) for (int i = 0; i < tn; i++) fprintf(f, " const float _t%d = psp_cpu.v[%d];", i, t[i]);
+    for (int i = 0; i < n; i++) {
+        fprintf(f, " psp_cpu.v[%d] = ", d[i]);
+        for (const char *p = expr; *p; p++)
+            if (*p == '$') fprintf(f, "_s%d", i);
+            else if (*p == '#') fprintf(f, "_t%d", tn == 1 ? 0 : i);
+            else fputc(*p, f);
+        fputc(';', f);
+    }
+    fprintf(f, " } else %s\n", slow);
+}
+
+/* Matrix register -> lanes, [col][row]. Must match matrix_cols_calc in src/vfpu.c. */
+static void vmcols(unsigned vd, int size, int cols[4][4]) {
+    const int mtx = (int)(vd >> 2) & 7, transpose = (int)(vd >> 5) & 1, col0 = (int)vd & 3;
+    const int row0 = size == 3 ? (int)(vd >> 6) & 1 : (int)(vd >> 5) & 2;
+    for (int c = 0; c < size; c++)
+        for (int r = 0; r < size; r++) {
+            const int cc = (col0 + c) & 3, rr = (row0 + r) & 3;
+            cols[c][r] = transpose ? mtx * 4 + rr * 32 + cc : mtx * 4 + cc * 32 + rr;
+        }
+}
+
+/* vtfmN / vhtfmN inline: vd[r] = sum_c M[r][c] * v[c], as psp_vtfm. */
+static void emit_vtfm(FILE *f, const char *ind, unsigned vd, unsigned vs, unsigned vt, int order, int hom,
+                      const char *slow) {
+    int m[4][4], t[4], d[4];
+    vmcols(vs, order, m); vlanes(vt, hom ? order - 1 : order, t); vlanes(vd, order, d);
+    fprintf(f, "%sif (!psp_vfpu_pfx) {", ind);
+    for (int c = 0; c < order - hom; c++) fprintf(f, " const float _t%d = psp_cpu.v[%d];", c, t[c]);
+    for (int r = 0; r < order; r++) {
+        fprintf(f, " const float _o%d = 0.0f", r);
+        for (int c = 0; c < order; c++)
+            if (hom && c == order - 1) fprintf(f, " + psp_cpu.v[%d] * 1.0f", m[r][c]);
+            else fprintf(f, " + psp_cpu.v[%d] * _t%d", m[r][c], c);
+        fputc(';', f);
+    }
+    for (int r = 0; r < order; r++) fprintf(f, " psp_cpu.v[%d] = _o%d;", d[r], r);
+    fprintf(f, " } else %s\n", slow);
+}
+
+/* vmmul inline: out[c][r] = sum_k A[r][k] * B[c][k], as psp_vmmul. */
+static void emit_vmmul(FILE *f, const char *ind, unsigned vd, unsigned vs, unsigned vt, int n, const char *slow) {
+    int a[4][4], b[4][4], d[4][4];
+    vmcols(vs, n, a); vmcols(vt, n, b); vmcols(vd, n, d);
+    fprintf(f, "%sif (!psp_vfpu_pfx) {", ind);
+    for (int c = 0; c < n; c++) for (int r = 0; r < n; r++) {
+        fprintf(f, " const float _o%d%d = 0.0f", c, r);
+        for (int k = 0; k < n; k++) fprintf(f, " + psp_cpu.v[%d] * psp_cpu.v[%d]", a[r][k], b[c][k]);
+        fputc(';', f);
+    }
+    for (int c = 0; c < n; c++) for (int r = 0; r < n; r++) fprintf(f, " psp_cpu.v[%d] = _o%d%d;", d[c][r], c, r);
+    fprintf(f, " } else %s\n", slow);
+}
+
+/* vcmp inline for the two-operand conditions and EZ/NZ, as psp_vcmp. */
+static int emit_vcmp(FILE *f, const char *ind, unsigned cond, unsigned vs, unsigned vt, int n, const char *slow) {
+    static const char *const OP[16] = { 0, "==", "<", "<=", 0, "!=", ">=", ">", "== 0.0f", 0, 0, 0, "!= 0.0f" };
+    cond &= 0xF;
+    if (!OP[cond]) return 0;
+    int s[4], t[4];
+    vlanes(vs, n, s); vlanes(vt, n, t);
+    fprintf(f, "%sif (!psp_vfpu_pfx) { uint32_t _c = 0;", ind);
+    for (int i = 0; i < n; i++)
+        if (cond >= 8) fprintf(f, " if (psp_cpu.v[%d] %s) _c |= %du;", s[i], OP[cond], 1 << i);
+        else fprintf(f, " if (psp_cpu.v[%d] %s psp_cpu.v[%d]) _c |= %du;", s[i], OP[cond], t[i], 1 << i);
+    const unsigned lm = (1u << n) - 1u;
+    fprintf(f, " if (_c) _c |= 16u; if (_c == %uu || _c == %uu) _c |= 32u;", lm | 16u, lm);
+    fprintf(f, " psp_cpu.vfpu_cc = (psp_cpu.vfpu_cc & ~%uu) | _c; } else %s\n", lm | 48u, slow);
+    return 1;
+}
+
 /* Generated register names: r_a0, r_sp, ... The generated header #defines each
  * onto psp_cpu.r[N]. Naming them beats indexing because the emitted code then
  * reads like the assembly it came from. */
@@ -488,20 +568,21 @@ static void emit_simple(ectx *c, const a_insn *in, const char *ind) {
     case A_VMUL:
         { char slow[96]; snprintf(slow, sizeof slow, "psp_vmul(%u, %u, %u, %u);", in->vd, in->vs, in->vt, in->vsize);
           emit_vinline(f, ind, '*', in->vd, in->vs, in->vt, (int)in->vsize, slow); } return;
-    case A_VDIV:
-        fprintf(f, "%spsp_vdiv(%u, %u, %u, %u);\n", ind, in->vd, in->vs, in->vt, in->vsize); return;
-    case A_VMIN:
-        fprintf(f, "%spsp_vmin(%u, %u, %u, %u);\n", ind, in->vd, in->vs, in->vt, in->vsize); return;
-    case A_VMAX:
-        fprintf(f, "%spsp_vmax(%u, %u, %u, %u);\n", ind, in->vd, in->vs, in->vt, in->vsize); return;
+    case A_VDIV: case A_VMIN: case A_VMAX: {
+        const char *nm = in->op == A_VDIV ? "vdiv" : in->op == A_VMIN ? "vmin" : "vmax";
+        const char *ex = in->op == A_VDIV ? "$ / #" : in->op == A_VMIN ? "$ < # ? $ : #" : "$ > # ? $ : #";
+        char slow[96]; snprintf(slow, sizeof slow, "psp_%s(%u, %u, %u, %u);", nm, in->vd, in->vs, in->vt, in->vsize);
+        emit_vexpr(f, ind, in->vd, in->vs, in->vt, (int)in->vsize, (int)in->vsize, ex, slow); return; }
     case A_VDOT:
         { char slow[96]; snprintf(slow, sizeof slow, "psp_vdot(%u, %u, %u, %u);", in->vd, in->vs, in->vt, in->vsize);
           emit_vinline(f, ind, 'd', in->vd, in->vs, in->vt, (int)in->vsize, slow); } return;
     case A_VSCL:
         { char slow[96]; snprintf(slow, sizeof slow, "psp_vscl(%u, %u, %u, %u);", in->vd, in->vs, in->vt, in->vsize);
           emit_vinline(f, ind, 's', in->vd, in->vs, in->vt, (int)in->vsize, slow); } return;
-    case A_VCMP:
-        fprintf(f, "%spsp_vcmp(%u, %u, %u, %u);\n", ind, in->vd & 0xF, in->vs, in->vt, in->vsize); return;
+    case A_VCMP: {
+        char slow[96]; snprintf(slow, sizeof slow, "psp_vcmp(%u, %u, %u, %u);", in->vd & 0xF, in->vs, in->vt, in->vsize);
+        if (!emit_vcmp(f, ind, in->vd, in->vs, in->vt, (int)in->vsize, slow)) fprintf(f, "%s%s\n", ind, slow);
+        return; }
     case A_VSGE: case A_VSLT: case A_VSCMP: case A_VHDP: case A_VCRS: case A_VCRSP: case A_VDET: {
         const char *fn = in->op == A_VSGE ? "vsge" : in->op == A_VSLT ? "vslt" :
                          in->op == A_VSCMP ? "vscmp" : in->op == A_VHDP ? "vhdp" :
@@ -563,6 +644,19 @@ static void emit_simple(ectx *c, const a_insn *in, const char *ind) {
             if (kind) { char slow[96];
                 snprintf(slow, sizeof slow, "psp_vunary(%s, %u, %u, %u);", U[k].sel, in->vd, in->vs, in->vsize);
                 emit_vinline(f, ind, kind, in->vd, in->vs, in->vs, (int)in->vsize, slow); return; }
+            /* The rest that are plain C, spelled as psp_vunary computes them. */
+            const char *ex = in->op == A_VRCP ? "1.0f / $" : in->op == A_VNRCP ? "-1.0f / $" :
+                             in->op == A_VRSQ ? "1.0f / psp_fsqrt($)" : in->op == A_VSQRT ? "psp_fsqrt($)" :
+                             in->op == A_VOCP ? "1.0f - $" :
+                             in->op == A_VSAT0 ? "($ < 0.0f ? 0.0f : ($ > 1.0f ? 1.0f : $))" :
+                             in->op == A_VSAT1 ? "($ < -1.0f ? -1.0f : ($ > 1.0f ? 1.0f : $))" :
+                             in->op == A_VSGN ? "($ > 0 ? 1.0f : ($ < 0 ? -1.0f : 0.0f))" :
+                             in->op == A_VSIN ? "sinf($ * 1.5707963267948966f)" :
+                             in->op == A_VCOS ? "cosf($ * 1.5707963267948966f)" :
+                             in->op == A_VNSIN ? "-sinf($ * 1.5707963267948966f)" : NULL;
+            if (ex) { char slow[96];
+                snprintf(slow, sizeof slow, "psp_vunary(%s, %u, %u, %u);", U[k].sel, in->vd, in->vs, in->vsize);
+                emit_vexpr(f, ind, in->vd, in->vs, in->vs, (int)in->vsize, 0, ex, slow); return; }
             fprintf(f, "%spsp_vunary(%s, %u, %u, %u);\n",
                     ind, U[k].sel, in->vd, in->vs, in->vsize);
             return;
@@ -614,14 +708,17 @@ static void emit_simple(ectx *c, const a_insn *in, const char *ind) {
 
     /* Matrix ops that need no multiply. `vsize` is the matrix order here. */
     case A_VMMUL:
-        fprintf(f, "%spsp_vmmul(%u, %u, %u, %u);\n", ind, in->vd, in->vs, in->vt, in->vsize); return;
+        { char slow[96]; snprintf(slow, sizeof slow, "psp_vmmul(%u, %u, %u, %u);", in->vd, in->vs, in->vt, in->vsize);
+          if (in->vsize >= 2 && in->vsize <= 4) emit_vmmul(f, ind, in->vd, in->vs, in->vt, (int)in->vsize, slow);
+          else fprintf(f, "%s%s\n", ind, slow); } return;
     case A_VTFM2: case A_VTFM3: case A_VTFM4: {
         /* The slot fixes the matrix order (2/3/4); an instruction size one
          * smaller is the homogeneous form, vhtfmN: the vector's last lane is
          * an implicit 1. Encoded for the runtime as order | 0x10. */
         const unsigned order = in->op == A_VTFM2 ? 2u : in->op == A_VTFM3 ? 3u : 4u;
         const unsigned arg = in->vsize + 1u == order ? (order | 0x10u) : order;
-        fprintf(f, "%spsp_vtfm(%u, %u, %u, %u);\n", ind, in->vd, in->vs, in->vt, arg); return; }
+        char slow[96]; snprintf(slow, sizeof slow, "psp_vtfm(%u, %u, %u, %u);", in->vd, in->vs, in->vt, arg);
+        emit_vtfm(f, ind, in->vd, in->vs, in->vt, (int)order, (arg & 0x10u) != 0, slow); return; }
     case A_VMSCL:
         fprintf(f, "%spsp_vmscl(%u, %u, %u, %u);\n", ind, in->vd, in->vs, in->vt, in->vsize); return;
     case A_VMIDT:
@@ -1101,7 +1198,7 @@ static void emit_function(ectx *c, const a_func *fn) {
             /* The callee's frame expects to return to a + 8; see the jr $ra
              * case. Saved and restored, because the callee sets its own. */
             fprintf(f, "    PSP_CALL_BEGIN(0x%08Xu);\n", link ? a + 8 : 0u);
-            if (in.is_indirect) fprintf(f, "    psp_dispatch(_t);\n");
+            if (in.is_indirect) fprintf(f, "    PSP_DISPATCH_CACHED(_t);\n");
             else                emit_static_call(c, in.target);
             fprintf(f, "    PSP_CALL_END(0x%08Xu);\n", link ? a + 8 : 0u);
             if (in.is_indirect) fprintf(f, "    }\n");
@@ -1158,7 +1255,7 @@ static void emit_function(ectx *c, const a_func *fn) {
             /* The target is read before the delay slot, as for jalr above. */
             fprintf(f, "    { uint32_t _t = %s;\n", RN[in.rs]);
             if (have_slot || taken_slot) { comment(c, &slot); emit_simple(c, &slot, "    "); }
-            fprintf(f, "    psp_dispatch(_t);\n    return; }\n");
+            fprintf(f, "    PSP_DISPATCH_CACHED(_t);\n    return; }\n");
             if (have_slot && c->is_label[widx(an, a + 4)]) emit_slot_alias(c, a, &slot, 0);
             a += 4;
             continue;
@@ -1270,14 +1367,15 @@ static void emit_header(FILE *f, const ectx *c, const emit_opts *o) {
         " * stop an unwind aimed here or pass on one aimed further out. */\n"
         "#define PSP_CALL_BEGIN(r) { psp_frame _f; _f.ret = (r); _f.prev = psp_cpu.frame;"
         " psp_cpu.frame = &_f;\n"
-        "#define PSP_CALL_END(r) psp_cpu.frame = _f.prev; if (psp_cpu.unwind) {"
+        "#define PSP_CALL_END(r) psp_cpu.frame = _f.prev; if (psp_post_ra == (r)) { if (psp_cpu.unwind) psp_post_ra = 0; else psp_post_run(); }"
+        " if (psp_cpu.unwind) {"
         " if (psp_cpu.unwind == (r)) psp_cpu.unwind = 0; else return; } }\n"
         "\n"
         "/* Build with -DPSPRECOMP_TRACE to record every function entry. Costs\n"
         " * one store per call when on, and nothing at all when off. A dispatch\n"
         " * miss then reports how the code arrived, not just where it went. */\n"
         "#ifdef PSPRECOMP_TRACE\n"
-        "#  define PSP_ENTER(a) psp_trace_fast(a)\n"
+        "#  define PSP_ENTER(a) if (psp_trace_fast(a)) return\n"
         "#  define PSP_LOOP(a)  psp_trace_loop(a)\n"
         "#else\n"
         "#  define PSP_ENTER(a) ((void)0)\n"

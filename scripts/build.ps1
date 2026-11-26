@@ -8,6 +8,14 @@ $env:PATH = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer;" + $env
 $vc = & vswhere -latest -property installationPath
 $vcvars = "$vc\VC\Auxiliary\Build\vcvars64.bat"
 $b = "$root\build"
+# Source sanity: a file re-saved through the wrong encoding turns UTF-8 text (key-cap arrows) into
+# mojibake (U+00E2 / U+00C3 followed by a cp1252 byte), and that still compiles. Stop the build
+# instead. Keep this file ASCII: PowerShell 5.1 reads a BOM-less .ps1 as ANSI.
+$bad = Get-ChildItem "$root\games", "$root\psprecomp\src", "$root\psprecomp\include", "$root\psprecomp\tools" -Recurse -Include *.c, *.h, *.cpp, *.txt -File |
+  Where-Object { $_.FullName -notmatch '\\third_party\\' } | Where-Object {
+    $t = [IO.File]::ReadAllText($_.FullName, [Text.Encoding]::UTF8)
+    $hi = "[$([char]0x80)-$([char]0xBF)$([char]0x152)-$([char]0x2122)]"; $t.Contains([char]0xFFFD) -or $t -cmatch "$([char]0xE2)$hi|$([char]0xC3)$hi" }
+if ($bad) { throw "Encoding damage (mojibake or invalid UTF-8) in:`n  $($bad.FullName -join "`n  ")" }
 cmd /c "`"$vcvars`" >nul && cmake -S `"$root`" -B `"$b`" -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo >nul && cmake --build `"$b`" --target allegrexrecomp"
 if (-not $NoEmit) {
   if (-not $Elf) {

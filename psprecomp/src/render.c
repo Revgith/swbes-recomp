@@ -117,8 +117,8 @@ static int wrap(int c, int size, int clamp) {
  * byte per row, two bits per texel -- then the two 565 endpoint colours, the
  * reverse of the desktop order. DXT3 and DXT5 follow the colour half with
  * their alpha half. Blocks run left to right in rows of tex_bw / 4.
- * ponytail: DXT1 is checked against WTF's backgrounds; the DXT5 alpha layout
- * (endpoints in the last two bytes) is not yet seen in a game. */
+ * DXT1 is checked against WTF's backgrounds; DXT5 alpha bits are the u32 at
+ * +8 (low) then the u16 at +12, endpoints in the last two bytes. */
 static uint32_t dxt_texel(const psp_draw_state *st, uint32_t x, uint32_t y) {
     const uint32_t size = st->tex_fmt == PSP_TPSM_DXT1 ? 8u : 16u;
     const uint32_t blk = st->tex_addr + ((y >> 2) * ((uint32_t)st->tex_bw / 4) + (x >> 2)) * size;
@@ -145,7 +145,7 @@ static uint32_t dxt_texel(const psp_draw_state *st, uint32_t x, uint32_t y) {
         const uint32_t al = (psp_read16(blk + 8 + (y & 3) * 2) >> ((x & 3) * 4)) & 0xF;
         out = (out & 0x00FFFFFFu) | ((al * 17) << 24);
     } else if (st->tex_fmt == PSP_TPSM_DXT5) {
-        const uint64_t bits = (uint64_t)psp_read16(blk + 12) | ((uint64_t)psp_read32(blk + 8) << 16);
+        const uint64_t bits = (uint64_t)psp_read32(blk + 8) | ((uint64_t)psp_read16(blk + 12) << 32);   /* u32 low, u16 high */
         const int a0 = psp_read8(blk + 14), a1 = psp_read8(blk + 15);
         const int k = (int)(bits >> (3 * i)) & 7;
         int al;

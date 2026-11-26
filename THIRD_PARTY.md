@@ -29,6 +29,12 @@ Movie playback runs an `ffmpeg.exe` found beside `swbes.exe` or on PATH.
 `scripts/build_ffmpeg.sh` builds a minimal LGPL one (FFmpeg 7.1), which releases
 include with its licence; its source is published beside each release.
 
+## Archivo Narrow Bold
+
+The HD Font mod's font (`games/swbes/mods/font`). Copyright 2019 The Archivo
+Narrow Project Authors (https://github.com/Omnibus-Type/ArchivoNarrow). SIL
+Open Font License 1.1, see `OFL.txt` in the mod's folder.
+
 ## IconPark: `enter-key` (Solid)
 
 Used for the Enter key prompt. Rasterized into `games/swbes/icon_enter_key.h`.

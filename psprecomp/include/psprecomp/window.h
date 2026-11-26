@@ -53,14 +53,18 @@ typedef struct {
     int fullscreen;   /* borderless fullscreen */
     int show_fps;     /* frame counter in the corner */
     int tex_filter;   /* world textures: 0 game's choice, 1 nearest, 2 bilinear, 3 trilinear + 16x anisotropic */
-    int ui_filter;    /* HUD and menus: 0 game's choice, 1 nearest, 2 bilinear */
+    int ui_filter;    /* HUD and menus: 0 game's choice, 1 nearest, 2 bilinear, 3 upscaled (bilinear, glyph edges re-sharpened) */
     int aim_assist;   /* game aim assist (aim slows/pulls onto targets); 0 = off */
     int res_scale;    /* internal resolution, multiple of 480x272; 0 = auto (fits the window) */
     int pad_sens;     /* controller stick aim speed, percent of the default */
     int prompts;      /* button prompts: 0 auto (last used device), 1 keyboard, 2 + PSP_STYLE_* forced */
     int filter;       /* the game's lavender colour filter (render_gl.c glow_sharp): 0 off, 1 on */
     int filter_blur;  /* 1: soft, as the PSP's quarter-size pass; 0: per pixel */
-    int veh_sens;     /* vehicle aim (ships, tanks, turrets, walkers), percent, on top of the mouse / stick one */} psp_settings_t;
+    int veh_sens;     /* vehicle aim (ships, tanks, turrets, walkers), percent, on top of the mouse / stick one */
+    int widescreen;   /* fill a window wider than 16:9: a wider view, the HUD kept to its shape */} psp_settings_t;
+/* Widescreen: the shown picture's width over the PSP's 480:272 one (1 = the PSP's). The
+ * game layer widens its camera by it; through-mode (HUD) draws are narrowed by it. */
+extern volatile float psp_wide;
 psp_settings_t *psp_settings(void);
 void psp_settings_save(void);
 void psp_settings_reload(void);   /* read [pc] again (settings.ini changed underneath) */

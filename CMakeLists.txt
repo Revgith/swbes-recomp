@@ -11,6 +11,12 @@ set(PSPRECOMP_REAL_THREADS ON CACHE BOOL "game needs real guest threads" FORCE)
 # Separate GPLv3 helper that decrypts the player's EBOOT on first start; added
 # before the global flags below so it builds as it would on its own.
 add_subdirectory(tools/ebootdec)
+# Developer harness (debug switches, the test command files: RELEASING.md,
+# release strip list). Off for releases; scriptspackage.ps1 refuses a dev exe.
+option(PSPRECOMP_DEV "Developer harness: debug env switches and test command files" OFF)
+if(PSPRECOMP_DEV)
+  add_compile_definitions(PSPRECOMP_DEV)
+endif()
 if(MSVC)
   # Speed: every getenv() goes through a cache (envcache.h, force-included);
   # no stack cookies; no incremental-link thunks on every call.

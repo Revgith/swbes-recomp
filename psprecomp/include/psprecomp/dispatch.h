@@ -36,6 +36,12 @@ psp_fn_t psp_lookup(uint32_t addr);
  * (below) rather than crashing, so bring-up gets a report naming the address
  * instead of an access violation. */
 void psp_dispatch(uint32_t addr);
+/* psp_dispatch through a one-entry cache per call site: indirect calls mostly hit the same
+ * target. Guest code runs one thread at a time (the baton), so plain statics are safe. */
+extern uint32_t psp_dispatch_gen;
+void psp_dispatch_fill(uint32_t addr, uint32_t *ca, psp_fn_t *cf, uint32_t *cg);
+#define PSP_DISPATCH_CACHED(t) do { static uint32_t _ca, _cg; static psp_fn_t _cf; const uint32_t _dt = (t); \
+    if (_dt == _ca && _cg == psp_dispatch_gen) _cf(); else psp_dispatch_fill(_dt, &_ca, &_cf, &_cg); } while (0)
 
 /* Call guest code from the host (a thread entry, a callback, an interrupt
  * handler, a constructor). Pushes a host frame: the guest's `jr $ra` at its end
@@ -73,11 +79,22 @@ extern uint32_t psp_trace_ring[4096];
 extern uint64_t psp_trace_n;
 extern int psp_trace_slow;
 extern uint32_t psp_trace_hook_bits[128];
-static inline void psp_trace_fast(uint32_t a) {
-    if (psp_trace_slow | (psp_trace_hook_bits[(a >> 2 & 4095) >> 5] & (1u << ((a >> 2) & 31))))
+/* An entry hook may set psp_trace_skip: the function then returns at once,
+ * without running (generated code returns when this gives 1). */
+extern int psp_trace_skip;
+static inline int psp_trace_fast(uint32_t a) {
+    if (psp_trace_slow | (psp_trace_hook_bits[(a >> 2 & 4095) >> 5] & (1u << ((a >> 2) & 31)))) {
         psp_trace_enter(a);
-    else psp_trace_ring[psp_trace_n++ & 4095] = a;
+        if (psp_trace_skip) { psp_trace_skip = 0; return 1; }
+    } else psp_trace_ring[psp_trace_n++ & 4095] = a;
+    return 0;
 }
+/* Return hook: an entry hook sets psp_post_ra to the call's return site
+ * (psp_cpu.r[31]), psp_post_sp and psp_post_fn; the caller runs psp_post_fn once the
+ * call has returned, before it goes on. */
+extern uint32_t psp_post_ra, psp_post_sp;   /* sp: the caller's (psp_cpu.r[29] at entry) */
+extern void (*psp_post_fn)(void);
+void psp_post_run(void);
 void psp_trace_dump(void);
 void psp_trace_reset(void);
 uint32_t psp_trace_last(void);

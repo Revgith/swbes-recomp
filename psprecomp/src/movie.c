@@ -116,18 +116,17 @@ static int skip_pressed(void) {
 
 int psp_movie_play(const char *path) {
     char ff[MAX_PATH], cmd[2 * MAX_PATH + 160];
-    if (!find_ffmpeg(ff, sizeof ff)) { fprintf(stderr, "movie: no ffmpeg (PATH or PSPRECOMP_FFMPEG), skipping %s\n", path); return 0; }
+    if (!find_ffmpeg(ff, sizeof ff)) { fprintf(stderr, "movie: no ffmpeg (PATH or PSPRECOMP_FFMPEG), skipping %s\n", psp_logpath(path)); return 0; }
     size_t n = 0; uint8_t *file = read_all(path, &n);
-    if (!file) { fprintf(stderr, "movie: cannot read %s\n", path); return 0; }
+    if (!file) { fprintf(stderr, "movie: cannot read %s\n", psp_logpath(path)); return 0; }
     size_t esn = 0, nfr = 0, vn = 0; uint8_t *es = demux(file, n, 0xBD, &esn);
     int16_t *pcm = es ? decode_audio(es, esn, &nfr) : NULL;
     free(es);
     char tmp[MAX_PATH]; { char td[MAX_PATH]; GetTempPathA(sizeof td, td); snprintf(tmp, sizeof tmp, "%spsprecomp_movie_%lu.264", td, GetCurrentProcessId()); }
     { uint8_t *v = demux(file, n, 0xE0, &vn); FILE *w = v && vn ? fopen(tmp, "wb") : NULL; if (w) { fwrite(v, 1, vn, w); fclose(w); } else vn = 0; free(v); }
     free(file);
-    if (!vn) { fprintf(stderr, "movie: no video in %s\n", path); free(pcm); return 0; }
-    fprintf(stderr, "movie: %s, audio %.1f s\n", path, nfr / 44100.0);
-    if (getenv("PSPRECOMP_MUTE")) { free(pcm); pcm = NULL; nfr = 0; }   /* no audio device: pace by wall time */
+    if (!vn) { fprintf(stderr, "movie: no video in %s\n", psp_logpath(path)); free(pcm); return 0; }
+    fprintf(stderr, "movie: %s, audio %.1f s\n", psp_logpath(path), nfr / 44100.0);
     { const char *d = getenv("PSPRECOMP_MOVIE_DUMP"); if (d && pcm) { FILE *w = fopen(d, "wb"); if (w) { fwrite(pcm, 4, nfr, w); fclose(w); } } }   /* debug: decoded audio as raw s16 stereo 44.1k */
 
     snprintf(cmd, sizeof cmd, "\"%s\" -nostdin -loglevel quiet -f h264 -i \"%s\" -an -f rawvideo -pix_fmt bgra -s %dx%d -", ff, tmp, VW, VH);
@@ -174,6 +173,7 @@ int psp_movie_play(const char *path) {
         if (psp_audio_host_queued(MOVIE_CH) < 6615) { const size_t k = nfr - apos < 1024 ? nfr - apos : 1024; psp_audio_host_push(MOVIE_CH, pcm + apos * 2, (uint32_t)k, 0, 0x8000, 0x8000); apos += k; }
         else Sleep(5);
         if (skip_pressed() || psp_window_closed()) { psp_audio_host_reset(MOVIE_CH); break; } }
+    psp_audio_host_end(MOVIE_CH);   /* the rest drains with no gap fill */
     psp_window_movie(NULL);
     free(frame); free(pcm); DeleteFileA(tmp);
     fprintf(stderr, "movie: %ld frames%s\n", shown, skipped ? " (skipped)" : "");

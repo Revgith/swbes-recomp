@@ -128,7 +128,16 @@ static volatile int g_snap_ready = -1;
 static volatile LONG g_latch_pending;
 static void latch_do(uint32_t addr, uint32_t stride, uint32_t fmt) {
     int slot = g_snap_ready == 0 ? 1 : 0;
+#ifdef PSPRECOMP_DEV
+    LARGE_INTEGER dq0; QueryPerformanceCounter(&dq0);
+#endif
     if (read_vram_at(addr, stride, fmt, g_snap[slot]) == 0) { g_snap_ready = slot; void psp_window_kick(void); psp_window_kick(); }
+#ifdef PSPRECOMP_DEV
+    { static int on = -1; if (on < 0) on = getenv("PSPRECOMP_FPSLOG") != NULL;   /* latch gaps and slow readbacks */
+      static LARGE_INTEGER f, p; LARGE_INTEGER c; if (on) { if (!f.QuadPart) QueryPerformanceFrequency(&f); QueryPerformanceCounter(&c);
+        const double gap = p.QuadPart ? (double)(c.QuadPart - p.QuadPart) * 1000.0 / (double)f.QuadPart : 0, rd = (double)(c.QuadPart - dq0.QuadPart) * 1000.0 / (double)f.QuadPart; p = c;
+        if (gap > 25.0 || rd > 8.0) fprintf(stderr, "latch spike: gap %.1f ms, read %.1f ms at %.3f s\n", gap, rd, (double)c.QuadPart / (double)f.QuadPart); } }
+#endif
     InterlockedDecrement(&g_latch_pending);
 }
 static void latch_frame(void) {
@@ -169,6 +178,9 @@ static void hle_SetFrameBuf(void) {
         static int on = -1; static uint32_t last_fb; static unsigned flips; static ULONGLONG t0;
         if (on < 0) on = getenv("PSPRECOMP_FPSLOG") != NULL;
         if (on && g_fb_addr != last_fb) { last_fb = g_fb_addr; flips++;
+            { static LARGE_INTEGER f, p; LARGE_INTEGER c; if (!f.QuadPart) QueryPerformanceFrequency(&f); QueryPerformanceCounter(&c);   /* long frames */
+              const double ms = p.QuadPart ? (double)(c.QuadPart - p.QuadPart) * 1000.0 / (double)f.QuadPart : 0; p = c;
+              if (ms > 25.0) fprintf(stderr, "spike: %.1f ms at %.3f s\n", ms, (double)c.QuadPart / (double)f.QuadPart); }
             ULONGLONG t = GetTickCount64(); if (!t0) t0 = t;
             if (t - t0 >= 2000) { extern unsigned psp_clock_reads, psp_rtc_reads;
                 fprintf(stderr, "fps: %.1f game frames/s (vbl %llu) clock reads %u rtc %u\n", flips * 1000.0 / (double)(t - t0), (unsigned long long)g_vblank_count, psp_clock_reads, psp_rtc_reads);
@@ -188,7 +200,8 @@ static void hle_WaitVblank(void) {
     g_vblank_count++;
     { extern volatile long psp_game_frames; psp_game_frames++;
       /* CPU cycles of the thread that presents frames (bench.ps1) */
-      extern volatile unsigned long long psp_game_cycles; ULONG64 c = 0; QueryThreadCycleTime(GetCurrentThread(), &c); psp_game_cycles = c; }
+      extern volatile unsigned long long psp_game_cycles; ULONG64 c = 0; QueryThreadCycleTime(GetCurrentThread(), &c); psp_game_cycles = c;
+      extern volatile unsigned long psp_game_tid; psp_game_tid = GetCurrentThreadId(); }
     if (g_vblank_count % 300 == 0 && getenv("PSPRECOMP_FPSLOG")) {
         static clock_t t0; clock_t t = clock();
         fprintf(stderr, "vbl %llu  %.1f vblanks/s\n", (unsigned long long)g_vblank_count, t0 ? 300.0 * CLOCKS_PER_SEC / (double)(t - t0) : 0.0);

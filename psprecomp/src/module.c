@@ -17,14 +17,14 @@ static uint32_t rd32(const uint8_t *p) {
 int psp_module_load(const char *path, uint32_t span, psp_module *m) {
     memset(m, 0, sizeof *m);
     FILE *f = fopen(path, "rb");
-    if (!f) { fprintf(stderr, "psprecomp: cannot open %s\n", path); return -1; }
+    if (!f) { fprintf(stderr, "psprecomp: cannot open %s\n", psp_logpath(path)); return -1; }
     fseek(f, 0, SEEK_END);
     const long n = ftell(f);
     rewind(f);
     uint8_t *b = (n > 52) ? (uint8_t *)malloc((size_t)n) : NULL;
     if (!b || fread(b, 1, (size_t)n, f) != (size_t)n) {
         fclose(f); free(b);
-        fprintf(stderr, "psprecomp: cannot read %s\n", path);
+        fprintf(stderr, "psprecomp: cannot read %s\n", psp_logpath(path));
         return -1;
     }
     fclose(f);
@@ -34,7 +34,7 @@ int psp_module_load(const char *path, uint32_t span, psp_module *m) {
     const uint32_t phoff = rd32(b + 28);
     if (memcmp(b, "\x7F" "ELF", 4) != 0 || (size_t)phoff + 32 > (size_t)n) {
         free(b);
-        fprintf(stderr, "psprecomp: %s is not a decrypted ELF module\n", path);
+        fprintf(stderr, "psprecomp: %s is not a decrypted ELF module\n", psp_logpath(path));
         return -1;
     }
     const uint8_t *ph = b + phoff;
@@ -44,7 +44,7 @@ int psp_module_load(const char *path, uint32_t span, psp_module *m) {
         psp_mem_map_module(vaddr, span) != 0 ||
         psp_mem_write_block(vaddr, b + off, filesz) != 0) {
         free(b);
-        fprintf(stderr, "psprecomp: cannot place %s at 0x%08X\n", path, vaddr);
+        fprintf(stderr, "psprecomp: cannot place %s at 0x%08X\n", psp_logpath(path), vaddr);
         return -1;
     }
 

@@ -5,10 +5,10 @@
  * and keeps a waveOut stream (44.1 kHz stereo) fed. The guest is still paced by
  * the HLE's own blocking model, so the queues only absorb jitter: one that grows
  * past MAX_QUEUE drops its oldest samples instead of drifting into latency, and
- * one that runs dry plays silence.
+ * one that runs dry mid-stream is gap-filled (below).
  *
- * PSPRECOMP_MUTE=1 turns output off. Non-Windows builds have no backend yet and
- * accept the samples silently. */
+ * PSPRECOMP_MUTE=1 (tests) runs the whole path but sends the device silence.
+ * Non-Windows builds have no backend yet and accept the samples silently. */
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -22,8 +22,25 @@
 #define BLOCK 512                    /* frames per waveOut buffer (~11.6 ms) */
 #define NBUF 6
 
-typedef struct { int16_t s[MAX_QUEUE * 2]; uint32_t rd, n; } queue_t;
+/* Gap fill: a channel that runs dry while streaming (the game lagging) replays
+ * its last HIST frames, fading out, instead of dropping to silence. The replay
+ * runs backwards from the newest frame and turns at each end (ping-pong), so it
+ * never jumps; when audio comes back it crossfades in. The idea is
+ * Dolphin's "fill audio gaps". */
+#define HIST 1024                    /* ~23 ms replayed */
+#define XF 64                        /* crossfade frames */
+#define DECAY 0.999f                 /* per frame: silent after ~90 ms */
+typedef struct {
+    int16_t s[MAX_QUEUE * 2]; uint32_t rd, n;
+    int16_t h[HIST * 2]; uint32_t hw, lj, base;   /* last frames played, write pos; replay step, newest frame at its start */
+    float g; int live, looping, xin, ended;       /* replay gain; had data; replaying; crossfade-in left; stream ended (no fill) */
+} queue_t;
 static queue_t g_q[CHANNELS];
+
+static const int16_t *replay(queue_t *q) {   /* the next replayed frame */
+    const uint32_t p = q->lj++ % (2 * (HIST - 1)), back = p < HIST - 1 ? p : 2 * (HIST - 1) - p;
+    return &q->h[(q->base + HIST - back) % HIST * 2];
+}
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -36,6 +53,7 @@ static HANDLE g_ev, g_thread;
 static WAVEHDR g_hdr[NBUF];
 static int16_t g_buf[NBUF][BLOCK * 2];
 static volatile LONG g_state;        /* 0 = not started, 1 = running, -1 = unavailable */
+static int g_mute;
 
 static void mix(int16_t *out, uint32_t frames) {
     int32_t acc[BLOCK * 2];
@@ -46,9 +64,32 @@ static void mix(int16_t *out, uint32_t frames) {
         uint32_t n = q->n < frames ? q->n : frames;
         for (uint32_t i = 0; i < n; i++) {
             uint32_t k = (q->rd + i) % MAX_QUEUE;
-            acc[i * 2] += q->s[k * 2]; acc[i * 2 + 1] += q->s[k * 2 + 1];
+            float l = q->s[k * 2], r = q->s[k * 2 + 1];
+            if (q->xin) {   /* back from a gap: fade the replay out under the real audio */
+                const float t = (float)(XF - q->xin) / XF; const int16_t *p = replay(q);
+                l = l * t + p[0] * q->g * (1 - t); r = r * t + p[1] * q->g * (1 - t);
+                q->xin--;
+            }
+            q->h[q->hw * 2] = q->s[k * 2]; q->h[q->hw * 2 + 1] = q->s[k * 2 + 1]; q->hw = (q->hw + 1) % HIST;
+            acc[i * 2] += (int32_t)l; acc[i * 2 + 1] += (int32_t)r;
         }
         q->rd = (q->rd + n) % MAX_QUEUE; q->n -= n;
+        if (n) { q->live = !q->ended; q->looping = 0; }
+        if (n < frames && q->live) {   /* ran dry mid-stream: replay */
+            if (!q->looping) { q->looping = 1; q->lj = 0; q->base = (q->hw + HIST - 1) % HIST; q->g = 1.0f; }
+            uint32_t i = n;
+            for (; i < frames && q->g > 0.02f; i++) {
+                const int16_t *p = replay(q);
+                acc[i * 2] += (int32_t)(p[0] * q->g); acc[i * 2 + 1] += (int32_t)(p[1] * q->g);
+                q->g *= DECAY;
+            }
+#ifdef PSPRECOMP_DEV
+            { static int on = -1; static unsigned fills, fr; static DWORD t0; if (on < 0) on = getenv("PSPRECOMP_FPSLOG") != NULL;
+              if (on) { fills++; fr += i - n; const DWORD t = GetTickCount(); if (t - t0 >= 2000) { fprintf(stderr, "gapfill: %u fills, %u frames in %lu ms (ch %d, n %u)\n", fills, fr, (unsigned long)(t - t0), c, n); fills = fr = 0; t0 = t; } } }
+#endif
+            if (q->g <= 0.02f) q->live = q->looping = 0;   /* faded out */
+            q->xin = q->looping ? XF : 0;
+        }
     }
     LeaveCriticalSection(&g_lock);
     for (uint32_t i = 0; i < frames * 2; i++)
@@ -66,6 +107,7 @@ static DWORD WINAPI pump(LPVOID unused) {
         for (int b = 0; b < NBUF; b++) {
             if (!(g_hdr[b].dwFlags & WHDR_DONE)) continue;
             mix(g_buf[b], BLOCK);
+            if (g_mute) memset(g_buf[b], 0, sizeof g_buf[b]);
             g_hdr[b].dwFlags &= ~WHDR_DONE;
             waveOutWrite(g_wo, &g_hdr[b], sizeof g_hdr[b]);
         }
@@ -74,7 +116,7 @@ static DWORD WINAPI pump(LPVOID unused) {
 
 static int start(void) {
     if (g_state) return g_state > 0;
-    if (getenv("PSPRECOMP_MUTE")) { g_state = -1; return 0; }
+    g_mute = getenv("PSPRECOMP_MUTE") != NULL;
     InitializeCriticalSection(&g_lock);
     WAVEFORMATEX f = {0};
     f.wFormatTag = WAVE_FORMAT_PCM; f.nChannels = 2; f.nSamplesPerSec = RATE;
@@ -106,8 +148,13 @@ static int start(void) { return 0; }
 
 void psp_audio_host_push(int ch, const int16_t *src, uint32_t frames, int mono, int lvol, int rvol) {
     if (ch < 0 || ch >= CHANNELS || !src || !frames || !start()) return;
+#if defined PSPRECOMP_DEV && defined _WIN32
+    { static int gt = -1; if (gt < 0) gt = getenv("PSPRECOMP_AUDIO_GAPTEST") != NULL;   /* test the gap fill: drop 40 ms of every 500, as a lagging game would */
+      if (gt && GetTickCount() % 500 < 40) return; }
+#endif
     LOCK();
     queue_t *q = &g_q[ch];
+    q->ended = 0;
     const int vol = psp_settings()->volume;   /* PC settings menu */
     for (uint32_t i = 0; i < frames; i++) {
         int32_t l = mono ? src[i] : src[i * 2], r = mono ? src[i] : src[i * 2 + 1];
@@ -129,5 +176,11 @@ uint32_t psp_audio_host_queued(int ch) {
 
 void psp_audio_host_reset(int ch) {
     if (ch < 0 || ch >= CHANNELS || g_state <= 0) return;
-    LOCK(); g_q[ch].rd = g_q[ch].n = 0; UNLOCK();
+    queue_t *q = &g_q[ch];
+    LOCK(); q->rd = q->n = 0; q->live = q->looping = q->xin = 0; UNLOCK();
+}
+
+void psp_audio_host_end(int ch) {
+    if (ch < 0 || ch >= CHANNELS || g_state <= 0) return;
+    LOCK(); g_q[ch].ended = 1; g_q[ch].live = 0; UNLOCK();   /* what is queued plays out; the end is not a gap */
 }

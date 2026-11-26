@@ -213,7 +213,16 @@ static void rwatch(uint32_t addr) {
     if (ns < 64) seen[ns++] = fn;
     fprintf(stderr, "rwatch: %08X read in fn 0x%08X ra 0x%08X\n", addr, fn, psp_cpu.r[31]);
 }
+uint32_t psp_dtfake_addr, psp_dtfake_lo, psp_dtfake_hi, psp_dtfake_lo2, psp_dtfake_hi2; float psp_dtfake_val;   /* dev: dtfake.cmd */
 float    psp_read_f32_slow(uint32_t addr) {
+    if (psp_dtfake_hi && addr == psp_dtfake_addr) {   /* reads under a call site in [lo,hi) see a fixed value */
+        const psp_frame *f = psp_cpu.frame;   /* innermost call in flight: the reader's call site */
+        if (f && ((f->ret >= psp_dtfake_lo && f->ret < psp_dtfake_hi) || (f->ret >= psp_dtfake_lo2 && f->ret < psp_dtfake_hi2))) {
+            if (psp_dtfake_val >= 0) return psp_dtfake_val;
+            { static uint32_t seen[64]; static int ns; uint32_t s0 = psp_cpu.r[16]; int k; for (k = 0; k < ns; k++) if (seen[k] == s0) break;   /* val < 0: log s0 +172/+184 */
+              if (k == ns && ns < 64) { seen[ns++] = s0; float t, r; memcpy(&t, psp_mem_ptr(s0 + 172, 4), 4); memcpy(&r, psp_mem_ptr(s0 + 184, 4), 4);
+                  fprintf(stderr, "dtlog: ret %08X s0 %08X t %.6f rate %.6f\n", f->ret, s0, t, r); } } }
+    }
     if (psp_rwatch_live || g_mem_dbg) {
         rwatch(addr);
         void *pp = psp_mem_ptr(addr, 4);

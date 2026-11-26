@@ -25,7 +25,7 @@ version=1.0
 description=One line shown on the Mods page.
 ```
 
-Every key is optional. If there is no `name`, the folder name is used.
+Every key is optional. If there is no `name`, the folder name is used. `on=0` makes the mod start switched off until it is turned on in F1 → Mods.
 
 ## Replacing disc files
 

@@ -505,9 +505,11 @@ static void park_for(int kind, uint64_t timeout_us) {
         host_mutex_lock(&t->wlock);
         t->wait_kind = kind;
         host_mutex_unlock(&t->wlock);
+#ifdef PSPRECOMP_DEV
         if (t->parks < 2)
             fprintf(stderr, "thread %u parks  : %s (virtual time %llu us)\n",
                     t->uid, wait_name(kind), (unsigned long long)g_vtime_us);
+#endif
         t->last_wait_kind = (uint32_t)kind;
     }
 #else
@@ -789,11 +791,13 @@ static uint32_t wait_loop(int (*ready)(void *), void *ctx, uint64_t timeout_us,
         if (!deadline && ++ticks > WAIT_TICKS_MAX) {
 #if PSPRECOMP_REAL_THREADS
             if (others_alive()) {
+#ifdef PSPRECOMP_DEV   /* normal idle waits trip it too: noise in a user's log */
                 if (ticks == WAIT_TICKS_MAX + 1 && g_wait_long++ < 8)
                     fprintf(stderr, "psprecomp: %s%s%s has waited %llu ticks; still waiting,"
                             " other threads are alive\n", what,
                             (name && name[0]) ? " '" : "", (name && name[0]) ? name : "",
                             (unsigned long long)WAIT_TICKS_MAX);
+#endif
             } else
 #endif
             {
@@ -853,7 +857,9 @@ static void *guest_thread_main(void *arg) {
     host_cond_broadcast(&g_baton_cv);
     host_mutex_unlock(&g_baton_m);
     g_started++;
+#ifdef PSPRECOMP_DEV
     fprintf(stderr, "thread %u started : entry 0x%08X\n", t->uid, t->entry);
+#endif
 
     if (setjmp(t->unwind) == 0) {
         t->unwind_set = 1;
@@ -945,8 +951,10 @@ static void hle_CreateThread(void) {
     t->wlock_ready = 1;
 #endif
     g_created++;
+#ifdef PSPRECOMP_DEV
     fprintf(stderr, "thread %u created : entry 0x%08X stack %u  (%s)\n",
             t->uid, t->entry, t->stack_size, t->name);
+#endif
     psp_ret(t->uid);
 }
 

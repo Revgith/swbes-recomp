@@ -175,7 +175,13 @@ static void hle_Open(void) {
         const char *sz = strstr(lb, "_size");
         len = sz ? (int64_t)strtoull(sz + 5, NULL, 16) : -1;
         const lbn_ent *e = lbn_find(L);
-        if (e) { f = fopen(e->host, "rb"); base = (int64_t)(L - e->lbn) * 2048; snprintf(host, sizeof host, "%s", e->host); }
+        if (e) { base = (int64_t)(L - e->lbn) * 2048; snprintf(host, sizeof host, "%s", e->host);
+            /* A whole file opened by sector: an enabled mod's copy still wins. */
+            const size_t dl = strlen(g_disc);
+            const char *rel = dl && !strncmp(e->host, g_disc, dl) ? e->host + dl + 1 : strstr(e->host, "/disc/") ? strstr(e->host, "/disc/") + 6 : NULL;
+            if (!base && rel && psp_mods_file(rel, host, sizeof host) && getenv("PSPRECOMP_TRACE_IO"))
+                fprintf(stderr, "io: mod file %s\n", host);
+            f = fopen(host, "rb"); }
     } else {
         f = fopen(host, mode);
         if (!f && (flags & PSP_O_CREAT)) f = fopen(host, "w+b");

@@ -168,7 +168,8 @@ static void page(int p) { if (p == g_page) return; g_page = p; if (p == 2) { ui_
 static const int FPS_OPT[] = { 30, 60, 90, 120, 144, 0 };
 static const char *const PROMPT_NAME[] = { "Auto", "Keyboard", "Xbox Series", "Xbox One", "Xbox 360", "DualSense", "DualShock 4", "Nintendo Switch" };
 static const char *const TEXF_NAME[] = { "Original", "Nearest", "Bilinear", "Trilinear 16x" };
-enum { NFPS = 6, NPROMPT = 8, NTEXF = 4, NUIF = 3, MAXRES = 8 };
+static const char *const UIF_NAME[] = { "Original", "Nearest", "Bilinear", "Upscaled" };
+enum { NFPS = 6, NPROMPT = 8, NTEXF = 4, NUIF = 4, MAXRES = 8 };
 static int clampi(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
 
 static void row(const char *label) {
@@ -194,6 +195,7 @@ static bool combo(const char *id, int *cur, int n, namer name) {
 static void fps_name(int k, char *b, size_t n) { if (FPS_OPT[k]) snprintf(b, n, "%d", FPS_OPT[k]); else snprintf(b, n, "Uncapped"); }
 static void prompt_name(int k, char *b, size_t n) { snprintf(b, n, "%s", PROMPT_NAME[k]); }
 static void texf_name(int k, char *b, size_t n) { snprintf(b, n, "%s", TEXF_NAME[k]); }
+static void uif_name(int k, char *b, size_t n) { snprintf(b, n, "%s", UIF_NAME[k]); }
 static int g_ch;   /* window height, for Auto resolution */
 static void res_name(int k, char *b, size_t n) {
     const int s = k ? k : psp_res_auto(g_ch);
@@ -222,11 +224,12 @@ static void options(psp_settings_t *s) {
     row("Volume"); ch |= ImGui::SliderInt("##vol", &s->volume, 0, 100, "%d%%");
     { int k = clampi(s->res_scale, 0, MAXRES); row("Internal resolution"); if (combo("##res", &k, MAXRES + 1, res_name)) { s->res_scale = k; ch = true; } }
     { int k = clampi(s->tex_filter, 0, NTEXF - 1); row("Texture filtering"); if (combo("##texf", &k, NTEXF, texf_name)) { s->tex_filter = k; ch = true; } }
-    { int k = clampi(s->ui_filter, 0, NUIF - 1); row("UI filtering"); if (combo("##uif", &k, NUIF, texf_name)) { s->ui_filter = k; ch = true; } }
+    { int k = clampi(s->ui_filter, 0, NUIF - 1); row("UI filtering"); if (combo("##uif", &k, NUIF, uif_name)) { s->ui_filter = k; ch = true; } }
     row("Color grade"); ch |= check("##filter", &s->filter);
     row("Grade blur"); ch |= check("##fblur", &s->filter_blur);
     row("Smooth scaling"); ch |= check("##smooth", &s->smooth);
     row("Fullscreen"); if (check("##full", &s->fullscreen)) { ch = true; g_full = true; }
+    row("Widescreen"); ch |= check("##wide", &s->widescreen);
     row("Show FPS"); ch |= check("##showfps", &s->show_fps);
     ImGui::EndTable();
     ImGui::Spacing();
@@ -345,7 +348,7 @@ void ui_frame(HWND h, uint32_t *px, int w, int hgt) {
     ImGui::NewFrame();
 
     if (s->show_fps) {   /* the picture's corner, same letterbox as window.c */
-        int vw = w, vh = w * 272 / 480; if (vh > hgt) { vh = hgt; vw = hgt * 480 / 272; }
+        int vw, vh; psp_window_view(&vw, &vh); if (vw <= 0 || vh <= 0) { vw = w; vh = hgt; }
         const ImVec2 p((float)((w - vw) / 2 + 8), (float)((hgt - vh) / 2 + 6));
         char t[32]; snprintf(t, sizeof t, "%d fps", ui_fps());
         ImDrawList *dl = ImGui::GetForegroundDrawList();

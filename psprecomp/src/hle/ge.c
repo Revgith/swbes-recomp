@@ -240,6 +240,12 @@ static void mvp_prep(void) {
         }
 }
 
+/* The projection is orthographic (w does not depend on position): screen-space
+ * art drawn through the transform, as the HUD's radar and bars are. */
+int psp_ge_ortho(void) { const float *P = g_xf.proj; return P[3] == 0 && P[7] == 0 && P[11] == 0; }
+/* A perspective made for the PSP's own 480:272 (not widened for widescreen): the
+ * HUD's spinning team logos, the menus' 3D. */
+int psp_ge_psp_aspect(void) { const float *P = g_xf.proj; return P[0] != 0 && fabsf(P[5] / P[0] - 480.0f / 272.0f) < 0.01f; }
 static float g_lastdx, g_lastdy;   /* drawing-space x,y of the last transformed vertex */
 static __forceinline int transform(const float p[3], float *sx, float *sy, float *sz) {
     const float *W = g_xf.world, *V = g_xf.view, *P = g_xf.proj;

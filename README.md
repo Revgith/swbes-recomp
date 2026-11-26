@@ -29,6 +29,7 @@ I haven't managed to test every single aspect of the project personally, and all
 - **Controllers.** Xbox, DualSense and DualShock 4 pads, with button prompts in your pad's own style.
 - **Everything rebindable.** Press F1 > Controls to set a key and a pad button per action. It adds optional extras the PSP never had, such as toggle sprint, previous weapon and target hold.
 - **Higher resolution.** The game renders above the PSP's 480x272 and runs uncapped or at a set frame rate. You also get texture filtering up to 16x anisotropic, and the colour filter can be turned off.
+- **Widescreen and fullscreen.** On wider screens (up to 32:9) the 3D view widens and the HUD stays 16:9 in the middle. Alt+Enter switches to borderless fullscreen. Both are in Options.
 - **Mods.** Replace disc files and textures, and dump textures to edit them. See `games/swbes/MODDING.md` (`docs` in releases).
 - **Cheats tab** in the F1 menu.
 

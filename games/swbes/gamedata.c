@@ -129,7 +129,7 @@ int swbes_find_game(char *elf, size_t elf_cap, char *disc, size_t disc_cap) {
     { char g[MAX_PATH + 16]; snprintf(g, sizeof g, "%s\\PSP_GAME", dir); if (!disc[0] && is_dir(g)) snprintf(disc, disc_cap, "%s", dir); }
     if (!disc[0] && iso[0]) {
         char d[MAX_PATH + 8]; snprintf(d, sizeof d, "%s\\disc", dir);
-        fprintf(stderr, "game data: unpacking %s (once)\n", iso);
+        fprintf(stderr, "game data: unpacking %s (once)\n", psp_logpath(iso));
         if (iso_unpack(iso, d)) { fail("Could not unpack the .iso in game_data (is it a PSP disc image, and is there ~2 GB free?)."); return -1; }
         snprintf(disc, disc_cap, "%s", d);
     }
@@ -159,6 +159,6 @@ int swbes_find_game(char *elf, size_t elf_cap, char *disc, size_t disc_cap) {
         snprintf(elf, elf_cap, "%s", dst);
     }
     _chdir(dir);   /* saves (ms), settings.ini and mods live beside the game */
-    fprintf(stderr, "game data: %s\n  eboot %s\n  disc  %s\n", dir, elf, disc);
+    fprintf(stderr, "game data: %s\n  eboot %s\n  disc  %s\n", psp_logpath(dir), psp_logpath(elf), psp_logpath(disc));
     return 0;
 }

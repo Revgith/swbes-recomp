@@ -18,6 +18,7 @@
 #include <psprecomp/module.h>
 #include <psprecomp/window.h>
 #include <psprecomp/render.h>
+#include <psprecomp/dispatch.h>
 
 #include <windows.h>
 #include <io.h>
@@ -419,6 +420,7 @@ static void con_run(void) {
         fprintf(stderr, "console: ran %s%s\n", help ? "help " : "", k_console_cmds[i].name);
     }
 }
+static uint32_t g_poke_a[128], g_poke_v[128]; static int g_poke_n;   /* poke.cmd entries */
 static int g_play_wheel, g_wheel21, g_throw_ok, g_in_ui, g_tut_popup;   /* g_tut_popup: a tutorial popup, whose hints name play controls */
 /* entry of the per-frame controller read (0x12C330): while G is held, the read reports the
  * input bound to the game's own throw-secondary action (d-pad Down) */
@@ -779,6 +781,7 @@ static void keycap(uint32_t *img, int iw, int x0, int y0, int cw, int ch, const 
  * where they can (a tint below white can't be undone for white). */
 #include "icon_enter_key.h"
 #include "icon_mouse_scroll.h"
+#include "font_atlas.h"
 static void iconcap(uint32_t *img, int iw, int x0, int y0, int cw, int ch, const char (*tab)[57], int pct, uint32_t tint) {
     enum { N = 56 };
     const int sz = ch * pct / 100, ox = (cw - sz) / 2, oy = (ch - sz) / 2;
@@ -1577,7 +1580,7 @@ static void throw_key(uint32_t addr) { (void)addr;
     con_run();
     static int sp_was;
     const int sp = !g_in_ui && BIND_DOWN(B_JUMP);
-    if (sp && !sp_was) g_jump_until = psp_game_frames + 1;
+    if (sp && !sp_was && psp_game_frames - g_fly_frame > 2) g_jump_until = psp_game_frames + 1;   /* on foot: in a ship ch 10 is fire */
     { static int c_was; const int c = !g_in_ui && BIND_DOWN(B_CROUCH);
       if (c && !c_was && psp_game_frames - g_fly_frame > 2) {   /* on foot; one-shot: the next read takes it */
         const float mx = move_x(), my = move_y(); const int x = mx < -0.5f ? -1 : mx > 0.5f, y = my < -0.5f ? -1 : my > 0.5f;
@@ -1793,8 +1796,100 @@ static void entry_guard(uint32_t addr) { (void)addr;
 }
 /* 0x9E9E8(page, input): the game hands this frame's pad input to one page -- the one that takes input */
 static uint32_t g_in_pg; static long g_in_pg_f = -100;
+/* 0x1FE08 / 0x1FF60(fov, zoom): set the game camera's lens: a horizontal
+ * fov in radians, the height following from the screen aspect (0x44B528).
+ * For widescreen the aspect is psp_wide times the PSP's (main loop) and the
+ * fov widened to match, tan(fov/2) x psp_wide: the same height, a wider
+ * view, and the game's culling (made from the fov) widens with it. */
+/* dev: SWBES_GOD=1 (or god.cmd present): 0x069AE0 sets a health (a0 = health object, f12 = new value,
+ * a0+84 = current); for the player's (soldier+0x324) a lower value is replaced by the current one. */
+static int g_god = -1;
+static void god_hook(uint32_t addr) {   /* 0x069AE0 */
+    (void)addr;
+#ifdef PSPRECOMP_DEV
+    if (g_god < 0) { const char *e = getenv("SWBES_GOD"); g_god = e && *e == '1'; FILE *f = fopen("god.cmd", "rb"); if (f) { fclose(f); g_god = 1; } }
+#else
+    g_god = 0;
+#endif
+    if (!g_god || !g_player_soldier || psp_cpu.r[4] != g_player_soldier + 0x324u) return;
+    const float cur = psp_read_f32(psp_cpu.r[4] + 84);
+    if (psp_cpu.f[12] < cur) psp_cpu.f[12] = cur;
+}
+/* The soldier's position source (0x0F5988 a1, from the vtable+28 getter): its physics body is at
+ * a1 - 8 (the walk fix below needs it). dev: teleport.cmd "x y z" */
+static uint32_t g_pos_src, g_pos_so, g_pos_mtx; static int g_tp_on; static float g_tp[3];   /* g_pos_so: the soldier g_pos_src was found for */
+static void pos_src_hook(uint32_t addr) {   /* 0x0F5988 */
+    (void)addr;
+    if (!g_player_soldier || psp_cpu.r[4] != g_player_soldier + 0x380u) return;
+    const uint32_t a1 = psp_cpu.r[5]; g_pos_mtx = psp_cpu.r[6];
+    if (fabsf(psp_read_f32(a1) - psp_read_f32(g_player_soldier + 0x3B8)) < 0.01f && fabsf(psp_read_f32(a1 + 8) - psp_read_f32(g_player_soldier + 0x3C0)) < 0.01f) { g_pos_src = a1; g_pos_so = g_player_soldier; }
+}
+/* High-fps walk fix. 0xE80C4 sweeps the soldier body (vel +0xB0, step +0x70, pos +0xD0,
+ * flags +0xF8) with a fixed 0.005 skin. The step's drop is g*dt^2, under the skin above
+ * ~45 fps, so ground contact flickers and the controller stops walking. While grounded and
+ * not rising (contact flag 0x04000000, vel y >= 0; +y is down), the drop (+0x74) is floored
+ * at 0.006 for that one move and put back afterwards, so jumps and falls are untouched. */
+static uint32_t g_gp_body; static float g_gp_y;
+static void ground_post(void) {
+    if (psp_read_f32(g_gp_body + 0x74) == 0.006f) psp_write_f32(g_gp_body + 0x74, g_gp_y);
+}
+static void body_move_hook(uint32_t addr) {   /* 0xE80C4 */
+    (void)addr;
+    const uint32_t b = psp_cpu.r[4];
+    if (!b || !g_pos_src || g_pos_so != g_player_soldier || b != psp_read32(g_pos_src - 8)) return;   /* the player soldier's body only (not a stale one after a respawn) */
+    const float dy = psp_read_f32(b + 0x74);
+    if (!(psp_read32(b + 0xF8) & 0x04000000u) || psp_read_f32(b + 0xB4) < 0.0f || dy < 0.0f || dy >= 0.006f) return;
+    g_gp_body = b; g_gp_y = dy; psp_write_f32(b + 0x74, 0.006f);
+    psp_post_fn = ground_post; psp_post_sp = psp_cpu.r[29]; psp_post_ra = psp_cpu.r[31];
+}
+
+static uint32_t g_lens_fn, g_lens_a[4]; static float g_lens_fov, g_lens_zoom, g_lens_k = 1.0f, g_lens_out = -1.0f; static int g_lens_fresh;
+static void cam_fov_hook(uint32_t addr) {
+    g_lens_fn = addr; memcpy(g_lens_a, &psp_cpu.r[4], sizeof g_lens_a); g_lens_fov = psp_cpu.f[12]; g_lens_zoom = psp_cpu.f[13]; g_lens_k = psp_wide;
+    if (g_lens_k > 1.0f) psp_cpu.f[12] = 2.0f * atanf(g_lens_k * tanf(psp_cpu.f[12] * 0.5f)); g_lens_fresh = 1;
+}
+/* 0x2018C: a world point to screen x/y, in place at a0 (a1: as pixels).
+ * The camera is widened, so x comes out spread over the wide view, and
+ * render_gl.c narrows screen-space draws by 1/psp_wide around x 240:
+ * spread x by psp_wide here so markers drawn at it land on their target.
+ * Narrower (psp_wide < 1): the view is taller and the HUD squeezed in y, so y
+ * is spread by 1/psp_wide. */
+static uint32_t g_w2s_vec; static int g_w2s_px;
+static void w2s_post(void) {
+    const float k = psp_wide;
+    if (!g_w2s_px || k == 1.0f) return;
+    if (k < 1.0f) { const float y = psp_read_f32(g_w2s_vec + 4); psp_write_f32(g_w2s_vec + 4, 136.0f + (y - 136.0f) / k); return; }
+    const float x = psp_read_f32(g_w2s_vec);
+    psp_write_f32(g_w2s_vec, 240.0f + (x - 240.0f) * k);
+}
+static void w2s_hook(uint32_t addr) { (void)addr;
+    g_w2s_vec = psp_cpu.r[4]; g_w2s_px = (psp_cpu.r[5] & 0xFF) != 0;
+    psp_post_fn = w2s_post; psp_post_sp = psp_cpu.r[29]; psp_post_ra = psp_cpu.r[31]; }
+/* 0x133B30: a perspective projection, its aspect read from 0x40FDB0. From
+ * 0x133C4C it is the world's, built each frame: widened. From elsewhere it is
+ * HUD 3D (the team logos, the radar): left at the PSP's, and render_gl.c
+ * narrows those draws like the rest of the HUD. When the window changed shape
+ * since the lens was set (startup, fullscreen, a resize), it is set again. */
+static void cam_proj_hook(uint32_t addr) {
+    (void)addr;
+    /* The world projection's fov as the lens last left it is widened already; one
+     * set some other way (the title logo's camera) is widened here. */
+    if (psp_cpu.r[31] == 0x00133C6Cu) {
+        if (g_lens_fresh) { g_lens_fresh = 0; g_lens_out = psp_cpu.f[12]; }
+        else if (psp_wide > 1.0f && psp_cpu.f[12] != g_lens_out) psp_cpu.f[12] = 2.0f * atanf(psp_wide * tanf(psp_cpu.f[12] * 0.5f)); }
+    {   const float f = 480.0f / 272.0f * (psp_cpu.r[31] == 0x00133C6Cu ? psp_wide : 1.0f); uint32_t u; memcpy(&u, &f, 4);
+        if (psp_read32(0x0040FDB0u) != u) psp_write32(0x0040FDB0u, u); }
+    if (!g_lens_fn || g_lens_k == psp_wide) return;
+    static psp_cpu_state saved; saved = psp_cpu;
+    psp_cpu.f[12] = g_lens_fov; psp_cpu.f[13] = g_lens_zoom; memcpy(&psp_cpu.r[4], g_lens_a, sizeof g_lens_a);   /* its camera, as last called */
+    psp_cpu.r[29] = (psp_cpu.r[29] - 0x100u) & ~15u; psp_cpu.r[31] = 0; psp_call_from_host(g_lens_fn);
+    psp_cpu = saved;
+}
 static void page_input(uint32_t addr) { (void)addr; g_in_pg = psp_cpu.r[4]; g_in_pg_f = psp_game_frames;
     if (getenv("SWBES_INPGLOG")) { static uint32_t lp; if (lp != g_in_pg) { lp = g_in_pg; fprintf(stderr, "inpage %08X ra %08X f%ld\n", g_in_pg, psp_cpu.r[31], psp_game_frames); } } }
+#ifdef PSPRECOMP_DEV
+static void opts_boot(long f);
+#endif
 static void page_tick(uint32_t addr) {
     (void)addr; const uint32_t p = psp_cpu.r[4]; const long f = psp_game_frames; int slot = -1;
     g_last_page = p; con_run();
@@ -1817,11 +1912,17 @@ static void page_tick(uint32_t addr) {
             if (seed > 1) psp_write32(0x0045EC80u, seed); }   /* SWBES_QUICKMATCH=<n>, n>1: same map every run */
           if (!qm_pick_map()) game_call(0x002E8A00u, 0, 0, 0);   /* add a random map */
           game_call(0x002E7BC4u, 0, 0, 0); }   /* start with the predefined settings */
+#ifdef PSPRECOMP_DEV
+    /* SWBES_OPTIONS=1 or options.cmd (dev): straight to the Options menu */
+    opts_boot(f);
+#endif
     /* ...then confirm team / spawn point with the game's own Select until the soldier is live */
     /* SWBES_QM_CP=<n>: spawn straight at the team's n-th command post (0-based) once one is available */
     if (armed == 2 && !g_player_soldier && f % 45 == 0 && !getenv("SWBES_QM_NOSPAWN")) {
         const char *cp = getenv("SWBES_QM_CP");
-        if (!cp || !spawn_at((uint32_t)atoi(cp))) psp_ctrl_pulse(0x4000u, 0, 6); } }
+        static int team_done; const char *tm = getenv("SWBES_QM_TEAM");   /* SWBES_QM_TEAM=1: Right on the team page first (the other team) */
+        if (tm && *tm == '1' && !team_done) { team_done = 1; psp_ctrl_pulse(0x0020u, 0, 6); }
+        else if (!cp || !spawn_at((uint32_t)atoi(cp))) psp_ctrl_pulse(0x4000u, 0, 6); } }
     for (int i = 0; i < g_pgn; i++) if (g_pg[i] == p) { g_pg_frame[i] = f; return; }
     for (int i = 0; i < g_pgn; i++) if (g_pg_frame[i] < f - 2) { slot = i; break; }
     if (slot < 0) { if (g_pgn >= 8) return; slot = g_pgn++; }
@@ -1850,6 +1951,26 @@ static void gui_flush(uint32_t addr) {
     }
     g_nev = 0;
 }
+#ifdef PSPRECOMP_DEV
+/* Activates, in turn, whichever of these buttons is shown on a live page: title Start, the
+ * dialog after it, "load an existing profile?" Yes, Load Successful's Continue, main menu Options. */
+static void opts_boot(long f) {
+    static const uint32_t S[] = { 0x5CD104E5u, 0x2D89A8C3u, 0x1DD256ABu, 0xA00D7839u, 0xFC630495u };
+    static int on = -1; static long next;
+    if (on < 0) on = getenv("SWBES_OPTIONS") != NULL;
+    if (!on && f % 30 == 0) { FILE *o = fopen("options.cmd", "rb"); if (o) { fclose(o); remove("options.cmd"); on = 1; } }
+    if (on != 1 || f < next) return;
+    for (int i = 0; i < g_pgn; i++) {
+        if (g_pg_frame[i] < f - 2) continue;
+        const uint32_t p = g_pg[i], arr = psp_read32(p + 0x18), n = psp_read32(p + 0x1C) & 0xFFFF;
+        for (uint32_t k = 0; arr && k < n && k < 256; k++) { const uint32_t w = psp_read32(arr + 4 * k);
+            if (!w || !(psp_read32(w + 0xCC) & 0xFF)) continue;
+            for (size_t s = 0; s < sizeof S / sizeof *S; s++) if (psp_read32(w + 0x90) == S[s]) {
+                gui_activate(S[s]); next = f + 60;
+                if (s == sizeof S / sizeof *S - 1) { on = 2; fprintf(stderr, "options: opened\n"); }
+                return; } } }
+}
+#endif
 /* Left / right arrow buttons (Select A Hero's, the campaign's era arrows): the
  * page reads the d-pad, so activating the button does nothing. Found by shape,
  * not id: a small button whose id +- 1 is a button of the same size on the
@@ -1868,7 +1989,9 @@ static uint32_t arrow_dir(uint32_t pg, uint32_t w) {
         if (d > 500.0f) return 0x80u; if (d < -500.0f) return 0x20u; }
     return 0;
 }
+int g_nav_used;   /* nav.cmd ran (dev): the menu mouse stays out of the way */
 static void menu_mouse(void) {
+    if (g_nav_used) return;
     static long last = -1; const long f = psp_game_frames;
     /* once per game frame; the conquest menu polls the pad without waiting for vblank, so the frame count stands still there: then every 16 ms */
     static ULONGLONG last_ms; const ULONGLONG ms = GetTickCount64();
@@ -2103,6 +2226,61 @@ void psp_trace_dump(void);
  * output goes to swbes.log beside it. Output a caller already redirected (the
  * test scripts, a terminal) is left alone. */
 static char g_log_path[MAX_PATH];
+#ifdef PSPRECOMP_DEV
+/* prof.cmd "<ms>" (dev): sample the game thread's instruction pointer for ms milliseconds and
+ * write the hottest host functions (recompiled guest functions included) to prof.txt. */
+#include <dbghelp.h>
+#pragma comment(lib, "dbghelp.lib")
+static DWORD WINAPI prof_run(void *arg) {
+    const DWORD ms = (DWORD)(uintptr_t)arg; extern volatile unsigned long psp_game_tid;
+    HANDLE th = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT, FALSE, psp_game_tid);
+    if (!th) return 0;
+    enum { MAXS = 1 << 20 }; static DWORD64 pcs[MAXS]; int n = 0;
+    timeBeginPeriod(1);
+    const ULONGLONG end = GetTickCount64() + ms;
+    while (GetTickCount64() < end && n < MAXS) {
+        if (SuspendThread(th) != (DWORD)-1) { CONTEXT c; c.ContextFlags = CONTEXT_CONTROL; if (GetThreadContext(th, &c)) pcs[n++] = c.Rip; ResumeThread(th); }
+        for (volatile int k = 0; k < 20000; k++) { }   /* ~10-20 us between samples */
+    }
+    timeEndPeriod(1); CloseHandle(th);
+    HANDLE ps = GetCurrentProcess(); SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS); { char sp[MAX_PATH]; GetModuleFileNameA(NULL, sp, MAX_PATH); char *bs = strrchr(sp, 0x5C); if (bs) *bs = 0; SymInitialize(ps, sp, TRUE); }
+    typedef struct { DWORD64 base; int n; char name[64]; } fn_t; static fn_t fns[8192]; int nf = 0, other = 0;
+    for (int i = 0; i < n; i++) {
+        char buf[sizeof(SYMBOL_INFO) + 64]; SYMBOL_INFO *si = (SYMBOL_INFO *)buf; si->SizeOfStruct = sizeof(SYMBOL_INFO); si->MaxNameLen = 63;
+        DWORD64 disp = 0; DWORD64 base = 0; const char *nm = "?";
+        if (SymFromAddr(ps, pcs[i], &disp, si)) { base = si->Address; nm = si->Name; } else { base = pcs[i] & ~0xFFFull; static char hx[24]; snprintf(hx, sizeof hx, "%llx e%lu", (unsigned long long)base, GetLastError()); nm = hx; }
+        int k = 0; while (k < nf && fns[k].base != base) k++;
+        if (k == nf) { if (nf == 8192) { other++; continue; } fns[nf].base = base; fns[nf].n = 0; snprintf(fns[nf].name, sizeof fns[nf].name, "%s", nm); nf++; }
+        fns[k].n++;
+    }
+    SymCleanup(ps);
+    for (int i = 0; i < nf; i++) for (int j = i + 1; j < nf; j++) if (fns[j].n > fns[i].n) { fn_t t = fns[i]; fns[i] = fns[j]; fns[j] = t; }
+    FILE *f = fopen("prof.tmp", "w");
+    if (f) { fprintf(f, "samples %d over %lu ms\n", n, (unsigned long)ms);
+        for (int i = 0; i < nf && i < 80; i++) fprintf(f, "%6.2f%% %6d %s\n", 100.0 * fns[i].n / n, fns[i].n, fns[i].name);
+        fclose(f); remove("prof.txt"); rename("prof.tmp", "prof.txt"); }
+    return 0;
+}
+#endif
+/* At LOG_CAP the log starts over, so it keeps the latest output: a message
+ * repeating every frame would otherwise fill the disk over a long session. */
+#define LOG_CAP (16 << 20)
+static DWORD WINAPI log_cap(void *arg) {
+    (void)arg;
+    DWORD cap = LOG_CAP;
+#ifdef PSPRECOMP_DEV
+    { const char *e = getenv("SWBES_LOGCAP_KB"); if (e && atoi(e) > 0) cap = (DWORD)atoi(e) << 10; }   /* test the cap */
+#endif
+    for (;;) {
+        Sleep(2000);
+        WIN32_FILE_ATTRIBUTE_DATA fa;
+        if (!GetFileAttributesExA(g_log_path, GetFileExInfoStandard, &fa)) continue;
+        if (!fa.nFileSizeHigh && fa.nFileSizeLow < cap) continue;
+        if (!freopen(g_log_path, "w", stderr)) return 0;
+        _dup2(_fileno(stderr), _fileno(stdout)); setvbuf(stderr, NULL, _IONBF, 0);
+        fprintf(stderr, "log: reached %lu KB, started over\n", (unsigned long)(cap >> 10));
+    }
+}
 static void log_open(void) {
     const HANDLE e = GetStdHandle(STD_ERROR_HANDLE);
     if (e && e != INVALID_HANDLE_VALUE && GetFileType(e) != FILE_TYPE_UNKNOWN) return;
@@ -2111,6 +2289,7 @@ static void log_open(void) {
     if (!freopen(g_log_path, "w", stderr)) { g_log_path[0] = 0; return; }
     _dup2(_fileno(stderr), _fileno(stdout));
     setvbuf(stderr, NULL, _IONBF, 0);
+    CreateThread(NULL, 0, log_cap, NULL, 0, NULL);
 }
 /* A crash leaves the exception and the last guest functions in the log. */
 static LONG WINAPI crash_filter(EXCEPTION_POINTERS *x) {
@@ -2126,6 +2305,9 @@ static LONG WINAPI crash_filter(EXCEPTION_POINTERS *x) {
 int main(int argc, char **argv) {
     log_open();
     SetUnhandledExceptionFilter(crash_filter);
+#ifdef PSPRECOMP_DEV
+    { extern int g_vslow, psp_vfpu_pfx; if (getenv("PSPRECOMP_VFPU_SLOW")) g_vslow = psp_vfpu_pfx = 1; }
+#endif
     /* With an argument: that module, its disc in <its folder>/disc (development).
      * Without: the player's game_data folder (gamedata.c). */
     static char found_elf[1024], found_disc[1024];
@@ -2150,7 +2332,7 @@ int main(int argc, char **argv) {
     if (psp_mem_init() != 0) { fprintf(stderr, "memory init failed\n"); return 1; }
     psp_module m;
     if (psp_module_load(elf, MODULE_SPAN, &m) != 0) {
-        fprintf(stderr, "usage: %s [decrypted module .elf]\n", argv[0]);
+        fprintf(stderr, "usage: %s [decrypted module .elf]\n", psp_logpath(argv[0]));
         return 1;
     }
     psp_cpu_reset();
@@ -2176,6 +2358,9 @@ int main(int argc, char **argv) {
 #define SWBES_VERSION "dev"
 #endif
     printf("swbes %s\n", SWBES_VERSION);
+#ifdef PSPRECOMP_DEV
+    printf("psprecomp dev harness build\n");   /* scripts\package.ps1 refuses an exe with this */
+#endif
     psp_window_version("v" SWBES_VERSION);
     if (psp_window_start("Battlefront: Elite Squadron", 0) != 0) {
         fprintf(stderr, "could not open a window\n");
@@ -2185,14 +2370,20 @@ int main(int argc, char **argv) {
            m.base, m.entry, m.gp, m.nctors);
 
     { void psp_trace_watch(uint32_t, void (*)(uint32_t)); psp_trace_watch(0x002738A8u, mouse_look_hook); }
-    { extern int psp_direct_play; psp_direct_play = 1; binds_load(); psp_key_remap = key_remap; binds_menu(); void psp_trace_hook(uint32_t, void (*)(uint32_t)); psp_trace_hook(0x0009ED20u, page_tick); psp_trace_hook(0x0009E9E8u, page_input); psp_trace_hook(0x0033D7A4u, entry_guard); psp_trace_hook(0x000A5044u, gui_flush); psp_trace_hook(0x0012C330u, throw_key); psp_trace_hook(0x000B73D0u, ctl_get); psp_trace_hook(0x001E8788u, upg_update); psp_trace_hook(0x001EBE00u, upg_setstate); psp_trace_hook(0x0020E85Cu, vehicle_aim_hook); psp_trace_hook(0x002364D4u, flyer_hook); psp_trace_hook(0x000B9170u, con_print); psp_trace_hook(0x000F0A10u, text_keys_hook); psp_trace_hook(0x0009CDBCu, text_keys_hook); psp_trace_hook(0x0012CD38u, movie_hook); psp_trace_hook(0x003380ECu, glyph_code_hook); psp_trace_hook(0x00045C60u, glyph_hash_hook);
+    { extern int psp_direct_play; psp_direct_play = 1; binds_load(); psp_key_remap = key_remap; binds_menu(); void psp_trace_hook(uint32_t, void (*)(uint32_t)); psp_trace_hook(0x0009ED20u, page_tick);
+    psp_trace_hook(0x0009E9E8u, page_input); psp_trace_hook(0x0001FE08u, cam_fov_hook);   psp_trace_hook(0x000F5988u, pos_src_hook); psp_trace_hook(0x00069AE0u, god_hook); psp_trace_hook(0x000E80C4u, body_move_hook); psp_trace_hook(0x0001FF60u, cam_fov_hook); psp_trace_hook(0x00133B30u, cam_proj_hook); psp_trace_hook(0x0002018Cu, w2s_hook); psp_trace_hook(0x0033D7A4u, entry_guard); psp_trace_hook(0x000A5044u, gui_flush); psp_trace_hook(0x0012C330u, throw_key); psp_trace_hook(0x000B73D0u, ctl_get); psp_trace_hook(0x001E8788u, upg_update); psp_trace_hook(0x001EBE00u, upg_setstate); psp_trace_hook(0x0020E85Cu, vehicle_aim_hook); psp_trace_hook(0x002364D4u, flyer_hook); psp_trace_hook(0x000B9170u, con_print); psp_trace_hook(0x000F0A10u, text_keys_hook); psp_trace_hook(0x0009CDBCu, text_keys_hook); psp_trace_hook(0x0012CD38u, movie_hook); psp_trace_hook(0x003380ECu, glyph_code_hook); psp_trace_hook(0x00045C60u, glyph_hash_hook);
     }
     psp_tex_post = tex_post;
     psp_sprite_color = sprite_color;
+    psp_font_atlas(font_hashes, (int)(sizeof font_hashes / sizeof *font_hashes), font_glyphs, (int)(sizeof font_glyphs / sizeof *font_glyphs));
     psp_module_start(&m);
     /* SWBES_SHOT=<vblank>[,<vblank>...]: write shot_<n>.ppm when the frame counter passes each. */
     const char *shots = getenv("SWBES_SHOT");
     while (!psp_window_closed()) {
+        {   /* widescreen: the screen aspect the cameras are built with (cam_fov_hook) */
+            static const uint32_t A[] = { 0x00408B38u, 0x0044B528u };   /* the camera's, and the global it sets */
+            const float f = 480.0f / 272.0f * psp_wide; uint32_t u; memcpy(&u, &f, 4);
+            for (int i = 0; i < 2; i++) if (psp_read32(A[i]) != u) psp_write32(A[i], u); }
         /* Live driving: "shot.cmd" in the run dir requests a capture (live.ppm). */
         { static unsigned long long lastv; FILE *cf;
           if (psp_display_vblanks() >= lastv + 10 && (lastv = psp_display_vblanks(), 1) && (cf = (psp_cmd_changed(&g_seen_shot) ? fopen("shot.cmd", "rb") : NULL)) != NULL) {
@@ -2241,6 +2432,53 @@ int main(int argc, char **argv) {
         { static long ldx, ldy, ln, lf = -1; void psp_mouse_inject(long, long);
           FILE *mf = fopen("look.cmd", "rb"); if (mf) { long dx, dy, n = 1; int c = fscanf(mf, "%ld %ld %ld", &dx, &dy, &n); if (c >= 2) { ldx = dx; ldy = dy; ln = n > 0 ? n : 1; lf = -1; } fclose(mf); remove("look.cmd"); }
           if (ln > 0 && psp_game_frames != lf) { lf = psp_game_frames; psp_mouse_inject(ldx, ldy); ln--; } }
+#ifdef PSPRECOMP_DEV
+        /* ylog: while ylog.cmd exists, the soldier's height each frame (ms y) to ylog.txt (dev) */
+        { static FILE *yl; static ULONGLONG yc; if (now_ms >= yc) { yc = now_ms + 200; FILE *f = fopen("ylog.cmd", "rb"); if (f) { fclose(f); if (!yl) yl = fopen("ylog.txt", "w"); } else if (yl) { fclose(yl); yl = NULL; } }
+          if (yl && g_player_soldier) fprintf(yl, "%llu %.4f\n", (unsigned long long)now_ms, psp_read_f32(g_player_soldier + 0x3BC)); }
+        /* teleport.cmd "x y z [yaw]" (dev): move the soldier's physics body (positions and bounds) by one delta */
+        { FILE *tf = fopen("teleport.cmd", "rb"); float t[4];
+          if (tf) { const int tn = fscanf(tf, "%f %f %f %f", &t[0], &t[1], &t[2], &t[3]); if (tn == 4) { g_tp_on = 90; g_tp[0] = t[3]; }   /* heading: turned to with mouse input (below) */
+              if (tn >= 3 && g_pos_src && g_player_soldier) {
+                  const uint32_t nd = g_pos_src - 0x10, bd = psp_read32(g_pos_src - 8);
+                  float d[3]; for (int k = 0; k < 3; k++) d[k] = t[k] - psp_read_f32(nd + 0x10 + 4 * k); fprintf(stderr, "teleport nd %08X bd %08X d %.2f %.2f %.2f\n", nd, bd, d[0], d[1], d[2]);
+                  static const uint16_t pos3[] = { 0xC0, 0xD0, 0xE0 }, box[] = { 0x120, 0x148 };
+                  for (int k = 0; k < 3; k++) { psp_write_f32(nd + 0x10 + 4 * k, psp_read_f32(nd + 0x10 + 4 * k) + d[k]);
+                      psp_write_f32(g_player_soldier + 0x3B8 + 4 * k, psp_read_f32(g_player_soldier + 0x3B8 + 4 * k) + d[k]);
+                      for (int j = 0; j < 3; j++) psp_write_f32(bd + pos3[j] + 4 * k, psp_read_f32(bd + pos3[j] + 4 * k) + d[k]);
+                      for (int j = 0; j < 2; j++) for (int m = 0; m < 2; m++) psp_write_f32(bd + box[j] + 8 * k + 4 * m, psp_read_f32(bd + box[j] + 8 * k + 4 * m) + d[k]); } }
+              fclose(tf); remove("teleport.cmd"); } }
+        /* teleport heading: mouse turns, each game frame, until the soldier's heading (*(so+0x48)+0xC4) is on target */
+        { static long tpf = -1; void psp_mouse_inject(long, long);
+          if (g_tp_on > 0 && g_player_soldier && psp_game_frames != tpf) { tpf = psp_game_frames;
+              float e = g_tp[0] - psp_read_f32(psp_read32(g_player_soldier + 0x48) + 0xC4); while (e > 3.14159265f) e -= 6.2831853f; while (e < -3.14159265f) e += 6.2831853f;
+              if (fabsf(e) < 0.002f) g_tp_on = 0;
+              else { long dx = lroundf(e / 0.0024f * 0.6f); if (dx > 300) dx = 300; if (dx < -300) dx = -300; if (!dx) dx = e > 0 ? 1 : -1; psp_mouse_inject(dx, 0); g_tp_on--; } } }
+        /* dev: per-game-frame soldier state, last 1024 frames; F9 writes them to stall.txt (appended) */
+        { typedef struct { unsigned long long ms; long fr; float p[3], n[3], v2d4, dt, step, acc, yaw; uint32_t f2d0; int keys; } rec_t;
+          static rec_t rb[1024]; static int rn; static long rf = -1; static int f9w;
+          if (g_player_soldier && psp_game_frames != rf) { const uint32_t so = g_player_soldier; rec_t *q = &rb[rn++ & 1023]; rf = psp_game_frames;
+              q->ms = now_ms; q->fr = rf; for (int k = 0; k < 3; k++) { q->p[k] = psp_read_f32(so + 0x3B8 + 4 * k); q->n[k] = psp_read_f32(so + 0x268 + 4 * k); }
+              q->v2d4 = psp_read_f32(so + 0x2D4); q->f2d0 = psp_read32(so + 0x2D0); q->dt = psp_read_f32(0x0045FE20u); q->step = psp_read_f32(0x004968B8u); q->acc = psp_read_f32(0x004968A0u);
+              q->yaw = psp_read_f32(psp_read32(so + 0x48) + 0xC4);
+              q->keys = (GetAsyncKeyState('W') < 0) | (GetAsyncKeyState('A') < 0) << 1 | (GetAsyncKeyState('S') < 0) << 2 | (GetAsyncKeyState('D') < 0) << 3 | (GetAsyncKeyState(VK_SPACE) < 0) << 4 | (GetAsyncKeyState(VK_SHIFT) < 0) << 5 | (GetAsyncKeyState(VK_CONTROL) < 0) << 6; }
+          const int dn = psp_key_down(VK_F9);
+          if (dn && !f9w) { FILE *f = fopen("stall.txt", "a");
+              if (f) { fprintf(f, "# F9 at %llu ms: ms frame x y z nx ny nz f2d0 v2d4 dt step acc yaw keys(WASD,space,shift,ctrl bits)\n", (unsigned long long)now_ms);
+                  const int cnt = rn < 1024 ? rn : 1024;
+                  for (int i = rn - cnt; i < rn; i++) { const rec_t *q = &rb[i & 1023]; if (now_ms - q->ms > 3000) continue;
+                      fprintf(f, "%llu %ld %.4f %.4f %.4f %.3f %.3f %.3f %u %.4f %.5f %.5f %.5f %.4f %d\n", q->ms, q->fr, q->p[0], q->p[1], q->p[2], q->n[0], q->n[1], q->n[2], q->f2d0, q->v2d4, q->dt, q->step, q->acc, q->yaw, q->keys); }
+                  fclose(f); } }
+          f9w = dn; }
+        /* F9: append the soldier's spot to spots.txt, to replay a stall (dev) */
+        { static int f9; static long f9f; static ULONGLONG f9t; const int dn = psp_key_down(VK_F9);
+          if (dn && !f9 && g_player_soldier) { FILE *f = fopen("spots.txt", "a"); const uint32_t so = g_player_soldier;
+              if (f) { fprintf(f, "yaw %.4f pos %.3f %.3f %.3f n %.3f %.3f %.3f f2d0 %u fps %.0f dt %.6f wasd %d%d%d%d\n", psp_read_f32(psp_read32(so + 0x48) + 0xC4), psp_read_f32(so + 0x3B8), psp_read_f32(so + 0x3BC), psp_read_f32(so + 0x3C0),
+                  psp_read_f32(so + 0x268), psp_read_f32(so + 0x26C), psp_read_f32(so + 0x270), psp_read32(so + 0x2D0),
+                  now_ms > f9t ? (psp_game_frames - f9f) * 1000.0 / (double)(now_ms - f9t) : 0.0, psp_read_f32(0x0045FE20u),
+                  GetAsyncKeyState('W') < 0, GetAsyncKeyState('A') < 0, GetAsyncKeyState('S') < 0, GetAsyncKeyState('D') < 0); fclose(f); } }
+          f9 = dn; if (now_ms - f9t >= 1000) { f9t = now_ms; f9f = psp_game_frames; } }
+#endif
         /* status.txt, every 250 ms: what the player is doing, for test scripts */
         { static ULONGLONG st_next; if (now_ms >= st_next) { st_next = now_ms + 250; FILE *sf = fopen("status.tmp", "w");
             if (sf) { const long gf = psp_game_frames;
@@ -2248,6 +2486,15 @@ int main(int argc, char **argv) {
                 const char *mode = gf - g_fly_frame <= 3 ? "fly" : gf - g_soldier_frame <= 3 ? "foot" : "none";
                 fprintf(sf, "altctl %u %u\nframe %ld\nmode %s\nui %d\nsoldier %08X\nflyer_map %08X\nfly_obj %08X\npage %08X\nfocus %08X\nhum_map %08X\n",
                         psp_read32(0x005C85D0u), psp_read32(0x005C85D0u + 28), gf, mode, g_in_ui, g_player_soldier, g_fly_map, g_fly_obj, g_last_page, g_last_page ? psp_read32(g_last_page + 0xA0) : 0, g_hum_map);
+                if (g_player_soldier) { const uint32_t so = g_player_soldier;   /* walking: position, a flag that toggles on the ground, ground normal(?) */
+                    fprintf(sf, "pos %.3f %.3f %.3f f2d0 %u n %.3f %.3f %.3f v2d4 %.4f wasd %d%d%d%d\n", psp_read_f32(so + 0x3B8), psp_read_f32(so + 0x3BC), psp_read_f32(so + 0x3C0),
+                            psp_read32(so + 0x2D0), psp_read_f32(so + 0x268), psp_read_f32(so + 0x26C), psp_read_f32(so + 0x270), psp_read_f32(so + 0x2D4),
+                            GetAsyncKeyState('W') < 0, GetAsyncKeyState('A') < 0, GetAsyncKeyState('S') < 0, GetAsyncKeyState('D') < 0); }
+                fprintf(sf, "phys dt %.6f acc %.6f step %.6f prev %.6f flag %u\n", psp_read_f32(0x0045FE20u), psp_read_f32(0x004968A0u), psp_read_f32(0x004968B8u), psp_read_f32(0x004968BCu), psp_read8(0x004968C8u));   /* physics step accumulator (0x0D4F58) */
+                fprintf(sf, "possrc %08X mtx %08X\n", g_pos_src, g_pos_mtx);
+                if (g_pos_src) { const uint32_t bd = psp_read32(g_pos_src - 8);   /* physics body: sleep timer, flags (bit0 asleep), sleep thresholds */
+                    fprintf(sf, "body %08X sleept %.4f flags %08X c %.5f %.5f %.5f\n", bd, psp_read_f32(bd + 352), psp_read32(bd + 248), psp_read_f32(0x0040F33Cu), psp_read_f32(0x0040F340u), psp_read_f32(0x0040F344u)); }
+                fprintf(sf, "yaw %.4f fwd %.3f %.3f\n", g_player_soldier ? psp_read_f32(psp_read32(g_player_soldier + 0x48) + 0xC4) : 0.0f, g_pos_src ? psp_read_f32(g_pos_src + 12) : 0.0f, g_pos_src ? psp_read_f32(g_pos_src + 20) : 0.0f);
                 fprintf(sf, "cycles %llu\n", gcyc);   /* game-thread CPU cycles at frame end (scripts/bench.ps1) */
                 fprintf(sf, "pages %d\nesc %d\ngcmenu %d\ngcstate %u\nwatch %d\ninpage %08X %ld n %u\n", g_pages_live, g_esc_on, g_gc_menu, psp_read32(0x005CE844u), gf - g_watch_frame < 30, g_in_pg, gf - g_in_pg_f, g_in_pg ? psp_read32(g_in_pg + 0x1C) & 0xFFFF : 0);   /* menu_back as Start; conquest menu / map state (3 map, 5 Buy Troops); SWBES_WATCHTXT drawn */
                 fclose(sf); remove("status.txt"); rename("status.tmp", "status.txt"); } } }
@@ -2259,12 +2506,20 @@ int main(int argc, char **argv) {
             float cap = f > 0 ? 1.0f / (float)f - trim : 1e-6f; if (cap < 1e-6f) cap = 1e-6f;
             psp_write_f32(0x0045FE40u, cap); }
         static unsigned seen_poll; const int ch = now_ms >= next_poll && psp_cmd_changed(&seen_poll);
+        for (int i = 0; i < g_poke_n; i++) psp_write32(g_poke_a[i], g_poke_v[i]);   /* poke.cmd, every frame */
         if (now_ms >= next_poll) { next_poll = now_ms + 100;
         if (ch) { FILE *ef = fopen("evwatch.cmd", "rb"); if (ef) { void psp_trace_watch(uint32_t, void (*)(uint32_t)); psp_trace_watch(0x0009FEB8u, ev_log); fclose(ef); remove("evwatch.cmd"); } }
         { FILE *wf = ch ? fopen("fnwatch.cmd", "rb") : NULL;   /* hex fn addr: log distinct callers */
           if (wf) { unsigned a; if (fscanf(wf, "%x", &a) == 1) { void psp_trace_watch(uint32_t, void (*)(uint32_t)); psp_trace_watch(a, fnwatch_log); } fclose(wf); remove("fnwatch.cmd"); } }
         { extern uint32_t psp_rwatch_live; FILE *wf = ch ? fopen("rwatch.cmd", "rb") : NULL;   /* hex addr: log float readers */
           if (wf) { unsigned a; if (fscanf(wf, "%x", &a) == 1) psp_rwatch_live = a; fclose(wf); remove("rwatch.cmd"); } }
+#ifdef PSPRECOMP_DEV
+        { extern uint32_t psp_rwatch_live, psp_dtfake_addr, psp_dtfake_lo, psp_dtfake_hi, psp_dtfake_lo2, psp_dtfake_hi2; extern float psp_dtfake_val;
+          FILE *wf = ch ? fopen("dtfake.cmd", "rb") : NULL;   /* "addr lo hi val": float reads of addr under a call site in [lo,hi) return val; "0 0 0 0" off */
+          if (wf) { unsigned a = 0, lo = 0, hi = 0, lo2 = 0, hi2 = 0; float v = 0; if (fscanf(wf, "%x %x %x %f %x %x", &a, &lo, &hi, &v, &lo2, &hi2) >= 4) { psp_dtfake_lo2 = lo2; psp_dtfake_hi2 = hi2;
+                  psp_dtfake_addr = a; psp_dtfake_lo = lo; psp_dtfake_hi = hi; psp_dtfake_val = v; psp_rwatch_live = hi ? a : 0; }
+              fclose(wf); remove("dtfake.cmd"); } }
+#endif
         { FILE *wf = ch ? fopen("rwatchall.cmd", "rb") : NULL;   /* hex addr: log readers of any width (slow) */
           if (wf) { unsigned a; void psp_mem_watch_read(uint32_t); if (fscanf(wf, "%x", &a) == 1) psp_mem_watch_read(a); fclose(wf); remove("rwatchall.cmd"); } }
         { FILE *wf = ch ? fopen("wwatchall.cmd", "rb") : NULL;   /* hex addr: log writers of any width (slow) */
@@ -2272,14 +2527,32 @@ int main(int argc, char **argv) {
         { extern uint32_t psp_watch_live; FILE *wf = ch ? fopen("watch.cmd", "rb") : NULL;   /* hex addr: log writers of that word */
           if (wf) { unsigned a; if (fscanf(wf, "%x", &a) == 1) psp_watch_live = a; fclose(wf); remove("watch.cmd"); } }
         { FILE *pf = ch ? fopen("poke.cmd", "rb") : NULL;     /* lines "addr value" (hex) -> written each frame until removed */
-          static uint32_t pa[16], pv[16]; static int pn;
-          if (pf) { pn = 0; while (pn < 16 && fscanf(pf, "%x %x", &pa[pn], &pv[pn]) == 2) pn++; fclose(pf); remove("poke.cmd"); }
-          for (int i = 0; i < pn; i++) psp_write32(pa[i], pv[i]); }
+          uint32_t *pa = g_poke_a, *pv = g_poke_v; int pn = g_poke_n;
+          if (pf) { pn = 0; while (pn < 128 && fscanf(pf, "%x %x", &pa[pn], &pv[pn]) == 2) pn++; fclose(pf); remove("poke.cmd"); }
+          g_poke_n = pn; }
         { static long hend = -1; FILE *hf = ch ? fopen("fnhist.cmd", "rb") : NULL;   /* "N": function-entry counts over N vblanks -> fnhist.txt */
           void psp_fnhist_start(void); void psp_fnhist_stop(FILE *);
           if (hf) { long n = 0; if (fscanf(hf, "%ld", &n) == 1 && n > 0) { hend = (long)psp_display_vblanks() + n; psp_fnhist_start(); } fclose(hf); remove("fnhist.cmd"); }
           if (hend >= 0 && (long)psp_display_vblanks() >= hend) { FILE *o = fopen("fnhist.tmp", "w"); hend = -1;
               if (o) { psp_fnhist_stop(o); fclose(o); remove("fnhist.txt"); rename("fnhist.tmp", "fnhist.txt"); } } }
+#ifdef PSPRECOMP_DEV
+        {   /* nav.cmd "options" or steps "x down down o ..." (dev): PSP buttons, one every 20 frames; turns menu mouse off for the run */
+            static unsigned q[64]; static int qn, qi; static long qnext; extern int g_nav_used;
+            FILE *nf = ch ? fopen("nav.cmd", "rb") : NULL;
+            if (nf) { char w[32]; qn = qi = 0; g_nav_used = 1; qnext = psp_game_frames;
+                static const struct { const char *n; unsigned b; } K[] = { { "up", 0x10 }, { "right", 0x20 }, { "down", 0x40 }, { "left", 0x80 },
+                    { "x", 0x4000 }, { "o", 0x2000 }, { "start", 0x8 }, { "wait", 0 } };
+                while (qn < 60 && fscanf(nf, "%31s", w) == 1) {
+                    if (!strcmp(w, "options")) { static const unsigned O[] = { 0x40, 0x40, 0x40, 0x40, 0x4000 }; for (int i = 0; i < 5; i++) q[qn++] = O[i]; continue; }
+                    for (size_t k = 0; k < sizeof K / sizeof *K; k++) if (!strcmp(w, K[k].n)) { q[qn++] = K[k].b; break; } }
+                fclose(nf); remove("nav.cmd"); }
+            if (qi < qn && psp_game_frames >= qnext) { if (q[qi]) psp_ctrl_pulse(q[qi], 0, 3); qi++; qnext = psp_game_frames + 20; } }
+        { FILE *pf = ch ? fopen("prof.cmd", "rb") : NULL; int ms = 0;   /* "<ms>": sample the game thread -> prof.txt */
+          if (pf) { if (fscanf(pf, "%d", &ms) != 1) ms = 2000; fclose(pf); remove("prof.cmd"); CloseHandle(CreateThread(NULL, 0, prof_run, (void *)(uintptr_t)ms, 0, NULL)); } }
+        { static int sp_ms, sp_n; static ULONGLONG sp_next; FILE *sf = ch ? fopen("spike.cmd", "rb") : NULL;   /* "ms n": n frame spikes of ms, 0.5 s apart (audio tests) */
+          if (sf) { if (fscanf(sf, "%d %d", &sp_ms, &sp_n) != 2) sp_n = 0; fclose(sf); remove("spike.cmd"); }
+          if (sp_n > 0 && GetTickCount64() >= sp_next) { Sleep((DWORD)sp_ms); sp_n--; sp_next = GetTickCount64() + 500; } }
+#endif
         { FILE *ff = ch ? fopen("fps.cmd", "rb") : NULL;
           if (ff) { int f; if (fscanf(ff, "%d", &f) == 1) psp_settings()->fps = f; fclose(ff); remove("fps.cmd"); } }
         { FILE *pf = ch ? fopen("pad.cmd", "rb") : NULL;   /* fake controller: "<hex buttons> lx ly rx ry [lt rt [ps]]" (sticks -1..1, y up; ps 1 = a PlayStation pad); "off" releases */

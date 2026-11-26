@@ -1,4 +1,4 @@
-/* psprecomp — static constructor discovery and execution. See src/ctors.c. */
+/* psprecomp â€” static constructor discovery and execution. See src/ctors.c. */
 #ifndef PSPRECOMP_CTORS_H
 #define PSPRECOMP_CTORS_H
 

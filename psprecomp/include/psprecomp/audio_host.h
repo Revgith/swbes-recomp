@@ -10,5 +10,6 @@ void psp_audio_host_push(int ch, const int16_t *src, uint32_t frames, int mono, 
 uint32_t psp_audio_host_queued(int ch);
 /* Drop whatever `ch` has queued (on release). */
 void psp_audio_host_reset(int ch);
+void psp_audio_host_end(int ch);     /* the stream ended: the rest plays out, no gap fill */
 
 #endif

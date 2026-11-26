@@ -138,8 +138,10 @@ void psp_hle_call(uint32_t nid) {
     case 0xA5C055CEu: case 0x1FF89745u: psp_netplay = 1; break;   /* ...EnterGameMode */
     case 0x34401D65u: case 0xCF8E084Du: psp_netplay = 0; break;   /* Disconnect / ExitGameMode */
     }
+#ifdef PSPRECOMP_DEV
     if (nid == 0x237DBD4Fu)
         fprintf(stderr, "psp_hle_call ENTERED for 0x237DBD4F (%d entries registered)\n", g_count);
+#endif
     for (int i = 0; i < g_count; i++) {
         if (g_entry[i].nid == nid) {
             g_calls[i]++;

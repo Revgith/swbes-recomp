@@ -85,11 +85,12 @@ void psp_mods_init(void) {
         ini_read(ini, "description", m->desc, sizeof m->desc);
         char d[MAX_PATH]; snprintf(d, sizeof d, "%s\\%s\\disc", g_root, m->dir);
         const DWORD a = GetFileAttributesA(d); m->files = a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
-        m->on = (int)GetPrivateProfileIntA("mods", m->dir, 1, psp_ini_path()) != 0;
+        const int def = (int)GetPrivateProfileIntA("mod", "on", 1, ini) != 0;   /* mod.ini on=0: off until switched on */
+        m->on = (int)GetPrivateProfileIntA("mods", m->dir, def, psp_ini_path()) != 0;
     }
     g_dump = (int)GetPrivateProfileIntA("mod_options", "dump_textures", 0, psp_ini_path()) != 0;
     EnterCriticalSection(&g_lock); index_textures(); LeaveCriticalSection(&g_lock);
-    if (g_nmod) { fprintf(stderr, "mods: %d in %s\n", g_nmod, g_root); for (int i = 0; i < g_nmod; i++)
+    if (g_nmod) { fprintf(stderr, "mods: %d in %s\n", g_nmod, psp_logpath(g_root)); for (int i = 0; i < g_nmod; i++)
         fprintf(stderr, "mods:   %s %s (%s)%s%s\n", g_mod[i].name, g_mod[i].version, g_mod[i].on ? "on" : "off", g_mod[i].files ? " files" : "", g_mod[i].textures ? " textures" : ""); }
 }
 
@@ -188,7 +189,7 @@ const uint32_t *psp_mods_texture(uint64_t hash, int *w, int *h) {
         if (!t->px && !t->failed) {
             char p[MAX_PATH]; snprintf(p, sizeof p, "%s\\%s\\textures\\%016llx.png", g_root, g_mod[t->mod].dir, (unsigned long long)hash);
             t->px = png_load(p, &t->w, &t->h);
-            if (!t->px) { t->failed = 1; fprintf(stderr, "mods: could not read %s\n", p);
+            if (!t->px) { t->failed = 1; fprintf(stderr, "mods: could not read %s\n", psp_logpath(p));
                 { char q[MAX_PATH], e[200]; snprintf(q, sizeof q, "%s", p); char *f = strrchr(q, '\\'), *m = NULL;   /* <mod>\textures\<file>: name both */
                   if (f) { *f++ = 0; char *t2 = strrchr(q, '\\'); if (t2) { *t2 = 0; m = strrchr(q, '\\'); m = m ? m + 1 : q; } }
                   snprintf(e, sizeof e, "%s: could not read %s", m ? m : "?", f ? f : p); psp_error("Mods", e, 15); } }

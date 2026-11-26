@@ -293,14 +293,14 @@ static uint32_t pad(uint8_t *ax, uint8_t *ay) {
 
 /* ---- PC settings (see window.h) ------------------------------------- */
 static psp_settings_t g_set;
-static const psp_settings_t g_def = { 60, 100, 0, 100, 0, 0, 0, 0, 0, 1, 0, 100, 0, 1, 1, 100 };
+static const psp_settings_t g_def = { 60, 100, 0, 100, 0, 0, 0, 0, 0, 1, 0, 100, 0, 1, 1, 100, 1 };
 static const char *ini_path(void) {
     static char p[MAX_PATH];
     if (!p[0]) { GetCurrentDirectoryA(MAX_PATH - 16, p); strcat(p, "\\settings.ini"); }
     return p;
 }
 const char *psp_ini_path(void) { return ini_path(); }
-#define SET_FIELDS(X) X(fps) X(sens_pct) X(invert) X(volume) X(smooth) X(fullscreen) X(show_fps) X(tex_filter) X(ui_filter) X(aim_assist) X(res_scale) X(pad_sens) X(prompts) X(filter) X(filter_blur) X(veh_sens)
+#define SET_FIELDS(X) X(fps) X(sens_pct) X(invert) X(volume) X(smooth) X(fullscreen) X(show_fps) X(tex_filter) X(ui_filter) X(aim_assist) X(res_scale) X(pad_sens) X(prompts) X(filter) X(filter_blur) X(veh_sens) X(widescreen)
 psp_settings_t *psp_settings(void) {
     static volatile LONG loaded;
     if (!loaded) {
@@ -326,6 +326,7 @@ void psp_settings_save(void) {
 
 /* ---- PC menu: state for ui.cpp, which draws it ------------------------- */
 volatile unsigned long long psp_game_cycles;
+volatile unsigned long psp_game_tid;      /* the thread that presents frames (display.c) */
 volatile long psp_game_frames;           /* bumped per game frame (display.c) */
 static int g_menu, g_fps_shown; static double g_ui_ms;   /* PSPRECOMP_PAINTBENCH: time in ui_frame */
 int psp_menu_open(void) { return g_menu; }
@@ -471,13 +472,24 @@ int ui_errors(ui_err_t *e, int cap) {   /* each live source's lines together, in
 static volatile LONG g_view_w, g_view_h;
 void psp_window_view(int *w, int *h) { *w = g_view_w; *h = g_view_h; }
 
+/* The picture's rectangle in a client area of cw x ch: the PSP's aspect, black
+ * bars around it; with widescreen on, a wider window is filled side to side
+ * (psp_wide, up to 32:9) and the game draws a wider view into it; a narrower
+ * one (down to 5:4, psp_wide < 1) is filled top to bottom with a taller view. */
+volatile float psp_wide = 1.0f;
+static void view_rect(int cw, int ch, int *x0, int *y0, int *w, int *hh) {
+    float k = 1.0f;
+    if (g_set.widescreen && !g_movie_on && ch > 0) { k = (float)cw * H / ((float)ch * W); k = k < 0.7f ? 0.7f : k > 2.0f ? 2.0f : k; }
+    if (k != psp_wide) psp_wide = k;
+    *w = cw; *hh = (int)(cw * H / (W * k));
+    if (*hh > ch) { *hh = ch; *w = (int)(ch * W * k / H); }
+    *x0 = (cw - *w) / 2; *y0 = (ch - *hh) / 2;
+}
+
 /* Everything shown, into an off-screen DC of cw x ch. */
 static void compose(HDC dc, uint32_t *px, int cw, int ch) {
-    /* Keep the PSP's aspect, black bars around it. */
-    int w = cw, hh = cw * H / W;
-    if (hh > ch) { hh = ch; w = ch * W / H; }
+    int w, hh, x0, y0; view_rect(cw, ch, &x0, &y0, &w, &hh);
     g_view_w = w; g_view_h = hh;
-    const int x0 = (cw - w) / 2, y0 = (ch - hh) / 2;
     PatBlt(dc, 0, 0, cw, y0, BLACKNESS);
     PatBlt(dc, 0, y0 + hh, cw, ch - y0 - hh, BLACKNESS);
     PatBlt(dc, 0, 0, x0, ch, BLACKNESS);
@@ -555,6 +567,14 @@ static void paint(HWND h) {
     if (bw != r.right || bh != r.bottom) { px = dib(&dc, &bm, r.right, r.bottom); bw = r.right; bh = r.bottom; }
     if (px) { compose(dc, px, r.right, r.bottom); BitBlt(wdc, 0, 0, r.right, r.bottom, dc, 0, 0, SRCCOPY); }
     EndPaint(h, &ps);
+#ifdef PSPRECOMP_DEV
+    { static int on = -1; if (on < 0) on = getenv("PSPRECOMP_FPSLOG") != NULL;   /* long gaps between paints */
+      static LARGE_INTEGER f, p; LARGE_INTEGER c; if (on) { if (!f.QuadPart) QueryPerformanceFrequency(&f); QueryPerformanceCounter(&c);
+        const double ms = p.QuadPart ? (double)(c.QuadPart - p.QuadPart) * 1000.0 / (double)f.QuadPart : 0; p = c;
+        static double sum; static int n; sum += ms; n++;
+        if (ms > 25.0) fprintf(stderr, "paint spike: %.1f ms at %.3f s\n", ms, (double)c.QuadPart / (double)f.QuadPart);
+        if (n == 500) { fprintf(stderr, "paint: %.1f ms avg\n", sum / n); sum = 0; n = 0; } } }
+#endif
 }
 /* PSPRECOMP_PAINTBENCH=WxH: also compose every frame into an off-screen
  * WxH bitmap and log the time (a hidden test window never paints). */
@@ -613,11 +633,13 @@ void psp_ui_take(int *clicks, int *rclicks, int *wheel, int *moved) {
 /* Client pixel -> PSP pixel (x16), through the same letterbox as paint(). */
 static void track_cursor(HWND h, int mx, int my) {
     RECT r; GetClientRect(h, &r);
-    int w = r.right, hh = r.right * H / W;
-    if (hh > r.bottom) { hh = r.bottom; w = r.bottom * W / H; }
+    int w, hh, x0, y0; view_rect(r.right, r.bottom, &x0, &y0, &w, &hh);
     if (w <= 0 || hh <= 0) return;
-    const int x0 = (r.right - w) / 2, y0 = (r.bottom - hh) / 2;
-    const LONG nx = (LONG)((mx - x0) * W * 16 / w), ny = (LONG)((my - y0) * H * 16 / hh);
+    /* the UI is drawn narrowed by 1/psp_wide around x 240 (wider screens), or
+     * squeezed by psp_wide around y 136 (narrower ones) */
+    const float k = psp_wide, fx = (float)(mx - x0) * W / w, fy = (float)(my - y0) * H / hh;
+    const float px = k > 1.0f ? 240.0f + (fx - 240.0f) * k : fx, py = k < 1.0f ? 136.0f + (fy - 136.0f) / k : fy;
+    const LONG nx = (LONG)(px * 16), ny = (LONG)(py * 16);
     if (nx != g_cx || ny != g_cy) { g_cx = nx; g_cy = ny; InterlockedExchange(&g_moved, 1); }
 }
 static void mouse_capture(HWND h, int on) {
@@ -643,6 +665,14 @@ void psp_window_kick(void) {
     if (g_hwnd && !g_menu && !InterlockedExchange(&g_kicked, 1)) PostMessageA(g_hwnd, WM_APP + 7, 0, 0);
 }
 
+#ifdef PSPRECOMP_DEV   /* PSPRECOMP_FPSLOG: slow steps of a frame on the window thread */
+static LARGE_INTEGER dbg_f, dbg_p;
+#define DBG_T0() do { if (!dbg_f.QuadPart) QueryPerformanceFrequency(&dbg_f); QueryPerformanceCounter(&dbg_p); } while (0)
+#define DBG_T(what) do { LARGE_INTEGER c_; QueryPerformanceCounter(&c_); const double ms_ = (double)(c_.QuadPart - dbg_p.QuadPart) * 1000.0 / (double)dbg_f.QuadPart; dbg_p = c_; if (ms_ > 8.0 && getenv("PSPRECOMP_FPSLOG")) fprintf(stderr, "slow %s: %.1f ms\n", what, ms_); } while (0)
+#else
+#define DBG_T0() ((void)0)
+#define DBG_T(what) ((void)0)
+#endif
 static LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     if (g_menu && ui_capt < 0 && ((msg >= WM_MOUSEFIRST && msg <= WM_MOUSELAST) || (msg >= WM_KEYFIRST && msg <= WM_KEYLAST) || msg == WM_SETFOCUS || msg == WM_KILLFOCUS))
         ui_wndproc(h, msg, wp, lp);   /* the menu (ImGui) sees input first; a bind waiting for a key does not share it */
@@ -662,10 +692,13 @@ static LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         if (msg == WM_TIMER) {
             if (g_menu) paint_bench();   /* no frame kicks while it is open */
         }
+        DBG_T0();
         uint8_t ax = 128, ay = 128;
         uint32_t b = pad(&ax, &ay);
+        DBG_T("pad");
         if (GetForegroundWindow() == h || g_nfake) b |= keyboard(&ax, &ay);   /* keys only when focused */
         else { g_kb_idle = 1; mouse_capture(h, 0); }
+        DBG_T("keyboard");
         if (psp_fire_r ? psp_fire_r() : (g_mcap && g_mlb)) b |= 0x200;
         {   /* the PC menu on the pad: Back + Start opens / closes it; ImGui moves
              * through it (ui.cpp); B goes back or closes, Start closes */
@@ -690,8 +723,10 @@ static LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         psp_ctrl_set(b, ax, ay);
         { static DWORD t0; static long f0; const DWORD t = GetTickCount();
           if (t - t0 >= 1000) { const long f = psp_game_frames; g_fps_shown = (int)((f - f0) * 1000 / (long)(t - t0 ? t - t0 : 1)); f0 = f; t0 = t; } }
+        DBG_T("mid");
         InvalidateRect(h, NULL, FALSE);
         if (msg != WM_TIMER) UpdateWindow(h);   /* kicked: paint now, not when the queue empties */
+        DBG_T("paint");
         return 0;
     }
     case WM_INPUT: {

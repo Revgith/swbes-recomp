@@ -841,7 +841,7 @@ ATRAC3Context *atrac3_alloc(int channels, int *block_align, const uint8_t *extra
             q->block_align != 152 * channels * frame_factor &&
             q->block_align != 192 * channels * frame_factor) {
             av_log(AV_LOG_ERROR, "Unknown frame/channel/frame_factor "
-                   "configuration %d/%d/%d", block_align,
+                   "configuration %d/%d/%d", *block_align,
                    channels, frame_factor);
             atrac3_free(q);
             return nullptr;

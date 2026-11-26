@@ -1,4 +1,4 @@
-﻿/* psprecomp â€” the smaller firmware libraries.
+﻿/* psprecomp — the smaller firmware libraries.
  *
  * Kernel_Library, UtilsForUser, StdioForUser, sceSuspendForUser,
  * LoadExecForUser, ModuleMgrForUser, sceCtrl and sceAudio. Individually small,
@@ -415,7 +415,7 @@ static void hle_Output2Reserve(void) {
     g_audio[OUTPUT2_CH].samples = psp_arg(0);
     psp_ret(SCE_KERNEL_ERROR_OK);
 }
-static void hle_Output2Release(void) { g_audio[OUTPUT2_CH].reserved = 0; psp_ret(SCE_KERNEL_ERROR_OK); }
+static void hle_Output2Release(void) { g_audio[OUTPUT2_CH].reserved = 0; psp_audio_host_end(OUTPUT2_CH); psp_ret(SCE_KERNEL_ERROR_OK); }
 static void hle_Output2ChangeLength(void) { g_audio[OUTPUT2_CH].samples = psp_arg(0); psp_ret(SCE_KERNEL_ERROR_OK); }
 static void hle_Output2OutputBlocking(void) {      /* (vol, buf) -> (ch, vol, buf) */
     psp_cpu.r[PSP_REG_A2] = psp_arg(1);

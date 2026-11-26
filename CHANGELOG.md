@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.6
+
+This update changes a lot, so it may be less stable than 0.1.5. If you hit problems, 0.1.5 is still available.
+
+- Widescreen (Options): on wider screens, up to 32:9, the 3D view widens and the HUD stays 16:9 in the middle.
+- HD Font mod, included and off by default: game text in a sharp font. Turn it on under F1 > Mods.
+- Mods: `on=0` in a mod's mod.ini keeps it off until it is switched on.
+- UI filtering: new Original and Upscaled choices.
+- Faster: the game's vector maths and indirect calls run with less overhead.
+- Audio: short gaps when the game hitches are filled instead of cutting out.
+- High frame rates: walking no longer stalls on flat ground.
+
 ## 0.1.5
 
 - F1 menu: clicks and keys no longer lag or get lost in large windows (#3); the menu draws faster.

@@ -12,12 +12,13 @@
 
 static uint32_t g_prefix[3];      /* vpfxs, vpfxt, vpfxd */
 static int      g_prefix_set[3];
+int g_vslow;   /* debug: 1 sends generated code down the runtime path always (host sets it with psp_vfpu_pfx) */
 int psp_vfpu_pfx;   /* any prefix pending: generated code takes its inline path only when 0 */
 static uint64_t g_traps;
 
 void psp_vfpu_reset(void) {
     memset(g_prefix, 0, sizeof g_prefix);
-    memset(g_prefix_set, 0, sizeof g_prefix_set); psp_vfpu_pfx = 0;
+    memset(g_prefix_set, 0, sizeof g_prefix_set); psp_vfpu_pfx = g_vslow;
     g_traps = 0;
 }
 
@@ -47,13 +48,13 @@ void psp_vfpu_unimplemented(uint32_t addr, const char *what) {
  * than compute a number that ignores it; WTF never prefixes a matrix op. */
 static int take_prefixes(uint32_t addr, const char *what) {
     if (!psp_vfpu_prefix_pending()) return 1;
-    memset(g_prefix_set, 0, sizeof g_prefix_set); psp_vfpu_pfx = 0;
+    memset(g_prefix_set, 0, sizeof g_prefix_set); psp_vfpu_pfx = g_vslow;
     psp_vfpu_unimplemented(addr, what);
     return 0;
 }
 
 /* Every vector op consumes the prefixes, whether or not they were set. */
-static inline void end_op(void) { if (psp_vfpu_pfx) { g_prefix_set[0] = g_prefix_set[1] = g_prefix_set[2] = 0; psp_vfpu_pfx = 0; } }
+static inline void end_op(void) { if (psp_vfpu_pfx) { g_prefix_set[0] = g_prefix_set[1] = g_prefix_set[2] = 0; psp_vfpu_pfx = g_vslow; } }
 
 /* ---- register addressing ------------------------------------------------- */
 
@@ -373,7 +374,7 @@ static double round_even(double v) {
  * three of those edges. */
 static uint32_t f2i(float x, int scale, int op) {
     if (x != x) return 0x7FFFFFFFu;
-    const double v = ldexp((double)x, scale);    /* exact: float * 2^31 fits a double */
+    const double v = (double)x * (double)(1ull << (scale & 31));   /* exact: float * 2^31 fits a double (ldexp cost ~0.5% of a frame) */
     double r;
     switch (op) {
     case PSP_VU_F2IN: r = round_even(v); break;
@@ -388,7 +389,7 @@ static uint32_t f2i(float x, int scale, int op) {
 
 /* vi2f: int * 2^-scale, rounded to float once. */
 static float i2f(uint32_t bits, int scale) {
-    return (float)ldexp((double)(int32_t)bits, -scale);
+    return (float)((double)(int32_t)bits / (double)(1ull << (scale & 31)));   /* exact, as ldexp */
 }
 
 void psp_vunary(int op, uint32_t vd, uint32_t vs, int size) {

@@ -24,6 +24,7 @@
 #include "psprecomp/mem.h"
 #include "psprecomp/window.h"
 #include "psprecomp/mods.h"
+#include "psprecomp/font.h"
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -32,6 +33,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 static int g_tr_live;
 static int g_skippost = -1;   /* nopost.cmd: "1"/"0" toggles the glow pass live */
 static int g_fdraw, g_maxdraw = -2;   /* PSPRECOMP_GL_MAXDRAW / maxdraw.cmd: drop draws past N in a frame */   /* live trace: log every draw of this frame (work/run/gltrace.cmd) */
@@ -274,7 +276,7 @@ static const char *FS =
     "uniform int at_on, at_func, at_ref, at_mask;\n"
     "uniform vec2 tex_size; uniform vec3 env; uniform vec3 src_mul;\n"
     "uniform int fog_on, ct_func, zr_on; uniform vec3 fog_col; uniform ivec3 ct_ref, ct_mask; uniform vec2 zr;\n"
-    "uniform int lod_mode; uniform float lod_slope, lod_bias;\n"
+    "uniform int lod_mode, ui_up; uniform float lod_slope, lod_bias;\n"
     "out vec4 o;\n"
     "void main() {\n"
     "  if (zr_on == 1) { float z = gl_FragCoord.z * 65535.0; if (z < zr.x || z > zr.y) discard; }\n"   /* MINZ/MAXZ */
@@ -283,6 +285,20 @@ static const char *FS =
     "    vec2 tc = clamp(v_uv / v_q, v_rect.xy, v_rect.zw) / tex_size;\n"
     /* TEXLEVEL slope mode: the level from the fragment's w, not its derivatives */
     "    vec4 t = lod_mode == 1 ? textureLod(tex, tc, log2(max(lod_slope / gl_FragCoord.w, 1e-6)) + lod_bias) : texture(tex, tc);\n"
+    /* "Upscaled" UI: the game's own glyphs redrawn as smooth outlines. Where
+     * the four nearest texels' alpha spans over half (a glyph edge), a
+     * bicubic (Catmull-Rom) fit of the 4x4 alpha is cut at its midpoint with
+     * a one-pixel ramp: curves instead of texel steps, at any size. Soft
+     * gradients keep plain bilinear. */
+    "    if (ui_up == 1) { ivec2 ts = textureSize(tex, 0); vec2 p = tc * vec2(ts) - 0.5, fp = fract(p); ivec2 b = ivec2(floor(p));\n"
+    "      vec4 wx = vec4(((-fp.x + 2.0) * fp.x - 1.0) * fp.x, (3.0 * fp.x - 5.0) * fp.x * fp.x + 2.0, ((-3.0 * fp.x + 4.0) * fp.x + 1.0) * fp.x, (fp.x - 1.0) * fp.x * fp.x) * 0.5;\n"
+    "      vec4 wy = vec4(((-fp.y + 2.0) * fp.y - 1.0) * fp.y, (3.0 * fp.y - 5.0) * fp.y * fp.y + 2.0, ((-3.0 * fp.y + 4.0) * fp.y + 1.0) * fp.y, (fp.y - 1.0) * fp.y * fp.y) * 0.5;\n"
+    "      float s = 0.0, lo = 1.0, hi = 0.0;\n"
+    "      vec2 rs = vec2(ts) / tex_size; ivec2 r0 = clamp(ivec2(floor(v_rect.xy * rs)), ivec2(0), ts - 1), r1 = clamp(ivec2(ceil(v_rect.zw * rs)) - 1, r0, ts - 1);\n"   /* the sprite's own texels, not the next glyph's */
+    "      for (int j = 0; j < 4; j++) for (int k = 0; k < 4; k++) { float v = texelFetch(tex, clamp(b + ivec2(k - 1, j - 1), r0, r1), 0).a; s += wx[k] * wy[j] * v;\n"
+    "        if (j == 1 || j == 2) if (k == 1 || k == 2) { lo = min(lo, v); hi = max(hi, v); } }\n"
+    "      float sw = max(fwidth(s), 1e-3) * 0.6, m = (lo + hi) * 0.5;\n"
+    "      if (hi - lo > 0.5) t.a = mix(lo, hi, smoothstep(m - sw, m + sw, s)); }\n"
     "    vec3 rgb; float a = c.a;\n"
     "    if (func == 0)      { rgb = t.rgb * c.rgb;                          if (tex_alpha == 1) a = t.a * c.a; }\n"
     "    else if (func == 1) { rgb = tex_alpha == 1 ? mix(c.rgb, t.rgb, t.a) : t.rgb; }\n"
@@ -311,7 +327,7 @@ static const char *FS =
 static GLuint g_prog, g_vao, g_vbo;
 static GLint  u_src_mul, u_tex_on, u_func, u_tex_alpha, u_dbl, u_flat, u_clear, u_at_on, u_at_func,
               u_at_ref, u_at_mask, u_tex_size, u_env, u_tex, u_fog_on, u_fog_col, u_ct_func, u_ct_ref, u_ct_mask,
-              u_zr_on, u_zr, u_lod_mode, u_lod_slope, u_lod_bias,
+              u_zr_on, u_zr, u_lod_mode, u_lod_slope, u_lod_bias, u_ui_up,
               u_fb, u_fetch_on, u_b_on, u_b_src, u_b_dst, u_b_op, u_b_sfix, u_b_dfix, u_st_on, u_st_func, u_st_ref,
               u_st_mask, u_sop_fail, u_sop_zfail, u_sop_zpass, u_st_pass, u_lop, u_fbfmt, u_dith_on, u_pmask, u_dith, u_scale;
 static int g_fetch;   /* the applied state draws through the framebuffer-read path */
@@ -340,7 +356,7 @@ static int setup_pipeline(void) {
     U(u_flat, "flat_shade"); U(u_clear, "clear_mode"); U(u_src_mul, "src_mul"); U(u_at_on, "at_on"); U(u_at_func, "at_func");
     U(u_at_ref, "at_ref"); U(u_at_mask, "at_mask"); U(u_tex_size, "tex_size"); U(u_env, "env"); U(u_tex, "tex");
     U(u_fog_on, "fog_on"); U(u_fog_col, "fog_col"); U(u_ct_func, "ct_func"); U(u_ct_ref, "ct_ref"); U(u_ct_mask, "ct_mask");
-    U(u_zr_on, "zr_on"); U(u_zr, "zr"); U(u_lod_mode, "lod_mode"); U(u_lod_slope, "lod_slope"); U(u_lod_bias, "lod_bias");
+    U(u_zr_on, "zr_on"); U(u_zr, "zr"); U(u_lod_mode, "lod_mode"); U(u_lod_slope, "lod_slope"); U(u_lod_bias, "lod_bias"); U(u_ui_up, "ui_up");
     U(u_fb, "fb"); U(u_fetch_on, "fetch_on"); U(u_b_on, "b_on"); U(u_b_src, "b_src"); U(u_b_dst, "b_dst"); U(u_b_op, "b_op");
     U(u_b_sfix, "b_sfix"); U(u_b_dfix, "b_dfix"); U(u_st_on, "st_on"); U(u_st_func, "st_func"); U(u_st_ref, "st_ref");
     U(u_st_mask, "st_mask"); U(u_sop_fail, "sop_fail"); U(u_sop_zpass, "sop_zpass"); U(u_sop_zfail, "sop_zfail"); U(u_st_pass, "st_pass"); U(u_lop, "lop"); U(u_fbfmt, "fbfmt");
@@ -373,6 +389,12 @@ static uint32_t g_tgt_addr, g_tgt_stride; static int g_tgt_fmt;
 static gl_fb *find_fb(uint32_t addr) {
     addr = (addr & (PSP_VRAM_SIZE - 1)) | PSP_VRAM_BASE;
     for (int i = 0; i < g_nfb; i++) if (g_fb[i].addr == addr) return &g_fb[i];
+    return NULL;
+}
+/* The render target whose pixels hold addr, if any (a texture read back from one). */
+static gl_fb *fb_holding(uint32_t addr) {
+    addr = (addr & (PSP_VRAM_SIZE - 1)) | PSP_VRAM_BASE;
+    for (int i = 0; i < g_nfb; i++) if (addr >= g_fb[i].addr && addr < g_fb[i].addr + (uint32_t)g_fb[i].w * 272u * (g_fb[i].fmt == 3 ? 4u : 2u)) return &g_fb[i];
     return NULL;
 }
 
@@ -531,10 +553,11 @@ static void fb_to_vram(gl_fb *f, int rows) {
 
 /* ---- textures ------------------------------------------------------------ */
 
-typedef struct { uint64_t key[4], hash; uint64_t frame; GLuint tex; int w, h; uint64_t used; int mip; } gl_tex;
+typedef struct { uint64_t key[4], hash; uint64_t frame; GLuint tex; int w, h; uint64_t used; int mip, big; } gl_tex;   /* big: a replacement larger than the PSP texture */
 #define MAX_TEX 1024
 static gl_tex   g_tex[MAX_TEX];
 static uint64_t g_tick, g_frame = 1;
+static int g_font_draw;           /* this draw is text from the font atlas, drawn from a font mod (see font.h) */
 static gl_tex  *g_last_tex;      /* the texture get_texture() last returned */
 static int      g_through, g_tex_bound;      /* the current draw is screen-space (HUD, menus) */
 /* The draw state last applied to GL, so an unchanged draw skips apply_state
@@ -565,6 +588,9 @@ static volatile LONG g_tex_regen;
 void psp_tex_refresh(void) { InterlockedIncrement(&g_tex_regen); }
 uint32_t g_clut_src;   /* the last CLOAD's source (ge.c), for PSPRECOMP_TEXWATCH */
 uint32_t g_clut_gen;   /* bumped by every CLOAD: the state's CLUT pointer never changes, its contents do */
+#ifdef PSPRECOMP_DEV
+static int g_dec_n, g_dec_vram; static double g_dec_ms;   /* texture decodes this shown frame (PSPRECOMP_FTLOG) */
+#endif
 static GLuint get_texture(const psp_draw_state *st) {
     const uint64_t frame = g_frame * 1000003ull + g_vgen;
     {   /* the enabled mods changed, or psp_tex_post's output did: decode (and replace) everything again */
@@ -636,6 +662,9 @@ static GLuint get_texture(const psp_draw_state *st) {
         g_tex[slot].frame = frame; g_tex[slot].used = ++g_tick; g_last_tex = &g_tex[slot]; return g_tex[slot].tex;
     }
     if (slot < 0) slot = lru;
+#ifdef PSPRECOMP_DEV
+    LARGE_INTEGER dq0; QueryPerformanceCounter(&dq0);
+#endif
     gl_tex *t = &g_tex[slot];
     if (!t->tex) glGenTextures(1, &t->tex);
     static uint32_t px[1024 * 1024];
@@ -645,7 +674,7 @@ static GLuint get_texture(const psp_draw_state *st) {
     {   /* PSPRECOMP_TEX_DUMP=1: write each newly decoded texture as tex_<addr>_<fmt>.ppm (first 200) */
         static int nd2 = -1; if (nd2 < 0) nd2 = getenv("PSPRECOMP_TEX_DUMP") ? 0 : 1 << 30;
         static uint32_t dlo = 1; if (dlo == 1) { const char *e = getenv("PSPRECOMP_TEX_DUMP"); dlo = e ? (uint32_t)strtoul(e, NULL, 16) : 0; }   /* value >1: dump only textures at/above that address */
-        if ((dlo <= 1 || (st->tex_addr >= dlo && st->tex_addr < dlo + 0x100000u)) && nd2++ < 200) {
+        if ((dlo <= 1 ? st->tex_addr >= 0x08000000u : st->tex_addr >= dlo && st->tex_addr < dlo + 0x100000u) && nd2++ < 200) {   /* 1: RAM textures only (not render targets) */
             char fn[64]; snprintf(fn, sizeof fn, "tex_%08X_%d_%d.ppm", st->tex_addr, st->tex_fmt, nd2);
             FILE *tf = fopen(fn, "wb");
             if (tf) { fprintf(tf, "P6 %d %d 255\n", w, hh);
@@ -679,9 +708,14 @@ static GLuint get_texture(const psp_draw_state *st) {
             }
         }
         glTexParameteri(GL_TEXTURE_2D, 0x813D /* GL_TEXTURE_MAX_LEVEL */, nl ? nl : 1000);
-        t->mip = nl ? 2 : 0; }
+        t->mip = nl ? 2 : 0; t->big = o && (ow > w || oh > hh);
+        }
     memcpy(t->key, key, sizeof key); t->hash = h; t->frame = frame; t->used = ++g_tick; t->w = w; t->h = hh;
     g_last_tex = t;
+#ifdef PSPRECOMP_DEV
+    { LARGE_INTEGER dq1, qf; QueryPerformanceCounter(&dq1); QueryPerformanceFrequency(&qf);
+      g_dec_n++; g_dec_ms += (double)(dq1.QuadPart - dq0.QuadPart) * 1000.0 / (double)qf.QuadPart; if (in_vram) g_dec_vram++; }
+#endif
     return t->tex;
 }
 
@@ -959,8 +993,14 @@ static void apply_state(const psp_draw_state *st) {
         /* PC "Texture filtering" option, for world textures only: screen-space
          * draws (HUD, menus) and render targets keep the game's own choice. */
         const int tf = psp_settings()->tex_filter, uf = psp_settings()->ui_filter;
-        if (lin && g_tex_bound && g_through && uf)      /* "UI filtering": 1 sharp, 2 smooth */
-            fmin = fmag = uf == 1 ? GL_NEAREST : GL_LINEAR;
+        const int up = lin && g_tex_bound && g_through && uf == 3 && !g_last_tex->big;
+        glUniform1i(u_ui_up, up);
+        if (lin && g_tex_bound && g_through && uf)      /* "UI filtering": 1 sharp, 2 smooth, 3 upscaled (smooth, edges re-sharpened) */
+            fmin = fmag = uf == 1 ? GL_NEAREST : GL_LINEAR;   /* mins stay linear: no mips on UI */
+        if (lin && g_tex_bound && g_through && uf != 1 && g_last_tex->big) {   /* a hi-res replacement (the font mod) drawn smaller: mipmapped, or stems alias to uneven widths */
+            if (!g_last_tex->mip) { glGenerateMipmap(GL_TEXTURE_2D); g_last_tex->mip = 1; }
+            fmin = 0x2703 /* GL_LINEAR_MIPMAP_LINEAR */; fmag = GL_LINEAR; lod_bias = 0.0f; lod_min = -1000.0f; lod_max = 1000.0f; slope = 0;
+        }
         if (lin && g_tex_bound && !g_through && tf) {
             if (tf == 1) fmin = fmag = GL_NEAREST;
             else if (tf == 2) fmin = fmag = GL_LINEAR;
@@ -989,10 +1029,48 @@ static void apply_state(const psp_draw_state *st) {
 static gl_vtx g_out[65536 * 3];
 static int g_culling;
 
+/* Widescreen (psp_wide > 1): the frame is shown stretched that much wider, and
+ * the game draws its 3D with a wider view to match. Screen-space draws (HUD,
+ * menus) are narrowed by the same factor so they keep their shape: towards
+ * the left edge, the right edge or the centre, whichever third of the screen
+ * the draw sits in, so the HUD stays at the corners. A draw across the whole
+ * screen (fades, backgrounds, the game's post passes) and draws that sample a
+ * render target stay as they are. Narrower (psp_wide < 1): the frame is shown
+ * taller, the 3D view taller with it, and those draws squeezed by psp_wide
+ * around y 136 instead. */
+int psp_ge_ortho(void), psp_ge_psp_aspect(void);
+static float g_hud_a, g_hud_s = 1.0f, g_hud_t = 1.0f;
+static uint32_t g_shown[4];   /* framebuffers gl_read_display has shown: only draws into these are HUD */
+static int g_cur_is_target(void) {   /* drawing into an off-screen render target, not a shown frame */
+    for (int i = 0; i < 4 && g_shown[i]; i++) if (g_shown[i] == g_cur->addr) return 0;
+    return 1;
+}
+static void hud_narrow(const psp_vertex *v, int count, const psp_draw_state *st) {
+    g_hud_s = g_hud_t = 1.0f;
+    const float k = psp_wide;
+    if (k == 1.0f || !count || st->clear) return;
+    { int i = 0; while (i < 4 && g_shown[i] && g_shown[i] != g_cur->addr) i++; if (i == 4 || !g_shown[i]) return; }   /* off-screen targets (effects) are not HUD */
+    if (v[0].has_f && !psp_ge_ortho() && !psp_ge_psp_aspect()) return;
+    if (st->tex_enable && (st->tex_addr & 0x0F000000u) == (PSP_VRAM_BASE & 0x0F000000u) && fb_holding(st->tex_addr)) return;
+    float x0 = 1e9f, x1 = -1e9f, y0 = 1e9f, y1 = -1e9f;
+    for (int i = 0; i < count; i++) {
+        const float x = v[i].has_f ? v[i].fx : (float)v[i].x, y = v[i].has_f ? v[i].fy : (float)v[i].y;
+        if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+    if (x1 - x0 >= 470.0f) return;
+    /* a large piece of a full-screen layer, pinned to a side edge (the spawn
+     * screen's backdrop in halves, overlays in quarters): stretched with the frame */
+    if ((x0 <= 0.0f || x1 >= 480.0f) && x1 - x0 >= 200.0f && y1 - y0 >= 120.0f) return;
+    const float c = (x0 + x1) * 0.5f;
+    static int th = -1; if (th < 0) th = getenv("PSPRECOMP_HUDTHIRDS") != NULL;
+    g_hud_a = !th ? 240.0f : c < 160.0f ? 0.0f : c > 320.0f ? 480.0f : 240.0f;
+    if (k > 1.0f) g_hud_s = 1.0f / k; else g_hud_t = k;
+}
 static __forceinline void put(gl_vtx *o, const psp_vertex *v, float u, float vv, uint32_t rgba) {
     const float sx = 2.0f / (float)g_cur->w, sy = 2.0f / (float)g_cur->h;
     const float w = v->w > 0 ? v->w : 1.0f;
-    const float px = v->has_f ? v->fx : (float)v->x, py = v->has_f ? v->fy : (float)v->y;
+    float px = v->has_f ? v->fx : (float)v->x, py = v->has_f ? v->fy : (float)v->y;
+    if (g_hud_s != 1.0f) px = g_hud_a + (px - g_hud_a) * g_hud_s;
+    if (g_hud_t != 1.0f) py = 136.0f + (py - 136.0f) * g_hud_t;
     /* The GE clamps each vertex's depth to 0..65535 before interpolating it;
      * an unclamped far vertex would drag the depth of the whole triangle. */
     /* Whole units, as the GE's 16-bit screen z (PPSSPP's VertexDepthRounding):
@@ -1024,6 +1102,7 @@ static void gl_target(uint32_t addr, uint32_t stride, int fmt) {
 
 static void gl_draw(int prim, const psp_vertex *v, int count, const psp_draw_state *st) {
     if (shadow()) psp_render_software.draw(prim, v, count, st);
+    g_font_draw = 0;
     if (!acquire()) return;
     if (!g_cur || g_cur->addr != ((g_tgt_addr & (PSP_VRAM_SIZE - 1)) | PSP_VRAM_BASE)) {
         g_cur = get_fb(g_tgt_addr, (int)(g_tgt_stride ? g_tgt_stride : 512), g_tgt_fmt);
@@ -1034,6 +1113,7 @@ static void gl_draw(int prim, const psp_vertex *v, int count, const psp_draw_sta
         fprintf(stderr, "gl:    pre fb %08X fbo %d/%u d %.5f thr %lu\n", g_cur->addr, fbo, g_cur->fbo, d0, (unsigned long)GetCurrentThreadId()); }
     int n = 0;
     GLenum mode = GL_TRIANGLES;
+    hud_narrow(v, count, st);
     switch (prim) {
     case PSP_PRIM_TRIANGLES:
         for (int i = 0; i + 2 < count; i += 3)
@@ -1073,12 +1153,99 @@ static void gl_draw(int prim, const psp_vertex *v, int count, const psp_draw_sta
         }
         break;
     case PSP_PRIM_SPRITES:
+        /* Text from the game's font atlas, with a font mod on: each glyph comes
+         * from the font instead, laid along the line by the font's own advances
+         * and kerning (a glyph starting where the last one's quad ended
+         * continues the pen (2 px slack: the game's g cell starts a pixel late); anything else starts it at the game's x).
+         * The atlas may sit in RAM or be copied into VRAM (menus): any texture
+         * but a render target is looked up. A clear is never text, even with the
+         * atlas still set as texture (the Options menu clears that way: dropped
+         * as text, the frame kept stale depth and the scene behind went black). */
+        if (st->tex_enable && !st->clear && !g_cur_is_target() && count && !v[0].has_f &&
+            !(st->tex_addr >= PSP_VRAM_BASE && st->tex_addr < PSP_VRAM_BASE + PSP_VRAM_SIZE && find_fb(st->tex_addr))) {
+            get_texture(st);
+            g_font_draw = g_last_tex && psp_font_on(g_last_tex->hash);
+        }
         for (int i = 0; i + 1 < count; i += 2) {
             const psp_vertex *p = &v[i], *q = &v[i + 1];
             if (p->behind || q->behind) continue;
             psp_vertex c[4] = { *p, *q, *p, *q };
             c[1].y = p->y; c[2].y = q->y;            /* (x1,y0) and (x0,y1) */
             c[1].z = c[2].z = q->z; c[0].z = q->z;
+            if (g_font_draw) {
+                const psp_font_glyph *fg = psp_font_find(p->u, p->v, q->u, q->v);
+                const float px = (float)p->x, qx = (float)q->x, py = (float)p->y, qy = (float)q->y;
+                const float x0 = fminf(px, qx), x1 = fmaxf(px, qx), yt = fminf(py, qy), h = fabsf(qy - py);
+                const float vt = fminf(p->v, q->v), dv = fabsf(q->v - p->v);
+                if (h <= 0.0f || dv <= 0.0f) continue;
+                const uint32_t cp = fg ? fg->cp : 0x20;   /* a blank cell (no ink box): the space */
+                const float k = h / dv, R = (float)g_scale, a = g_hud_a, s = g_hud_s, cap = psp_font_cap() * k * R;
+                static float run_end = -1e9f, run_pen, run_y, run_cap; static uint32_t run_cp;
+                const int cont = fabsf(x0 - run_end) <= 2.01f && yt == run_y && cap == run_cap;
+                psp_font_bm bm; float kern = 0.0f;
+                const int ok = psp_font_get(cp, cont ? run_cp : 0, cap, s, &bm, &kern);
+                const float pen = cont ? run_pen + kern / (R * s) : x0;
+                run_end = x1; run_y = yt; run_cap = cap; run_cp = cp; run_pen = pen + bm.adv / (R * s);
+                if (!ok || bm.w <= 0 || bm.h <= 0) continue;
+                /* on whole render pixels, so the glyph is drawn 1:1 */
+                const float bl = floorf((yt + ((float)(fg ? fg->base : 0) - vt) * k) * R + 0.5f);
+                const float gx = floorf((a + (pen - a) * s) * R + bm.xoff + 0.5f);
+                const float X0 = a + (gx / R - a) / s, X1 = a + ((gx + (float)bm.w) / R - a) / s;
+                const float Y0 = (bl + bm.yoff) / R, Y1 = Y0 + (float)bm.h / R;
+                c[0].fx = X0; c[0].fy = Y0; c[1].fx = X1; c[1].fy = Y0; c[2].fx = X0; c[2].fy = Y1; c[3].fx = X1; c[3].fy = Y1;
+                for (int k2 = 0; k2 < 4; k2++) c[k2].has_f = 1;
+                const float u0 = (float)bm.x, v0 = (float)bm.y, u1 = u0 + (float)bm.w, v1 = v0 + (float)bm.h;
+                const uint32_t col = psp_sprite_color ? psp_sprite_color(st->tex_w, st->tex_h, p->u, p->v, q->u, q->v, q->rgba) : q->rgba;
+                put(&g_out[n++], &c[0], u0, v0, col);
+                put(&g_out[n++], &c[1], u1, v0, col);
+                put(&g_out[n++], &c[2], u0, v1, col);
+                put(&g_out[n++], &c[1], u1, v0, col);
+                put(&g_out[n++], &c[3], u1, v1, col);
+                put(&g_out[n++], &c[2], u0, v1, col);
+                continue;
+            }
+            if (st->tex_enable && !g_cur_is_target()) {
+                /* Narrowed (widescreen) screen-space sprites land at fractions of
+                 * a pixel, a different one per glyph, so the same letter drew
+                 * differently along a line: put the left edge on a render pixel
+                 * and round the width the same way every time. */
+                /* the grid is the shown picture's pixels (window), not the render's: the
+                 * frame is resized to the window after, so that is where a stem lands */
+                int vw = 0, vh = 0; psp_window_view(&vw, &vh);
+                const float g = vw > 0 ? (float)vw / 480.0f : (float)g_scale, gy = vh > 0 ? (float)vh / 272.0f : (float)g_scale, a = g_hud_a, s = g_hud_s;
+                const float px = p->has_f ? p->fx : (float)p->x, qx = q->has_f ? q->fx : (float)q->x;
+                const float py = p->has_f ? p->fy : (float)p->y, qy = q->has_f ? q->fy : (float)q->y;
+                const int pl = px <= qx;   /* p is the left edge */
+                float x0 = pl ? px : qx, x1 = pl ? qx : px;
+                {   /* scaled text: the game rounds both edges of each glyph to a whole
+                     * pixel, so one glyph came out 2 px wide here and 3 there; take the
+                     * width from its texels at the text's scale (rows give the scale) */
+                    const float du = fabsf(q->u - p->u), dv = fabsf(q->v - p->v), h = fabsf(qy - py);
+                    if (du > 0.0f && dv > 0.0f && h > 0.0f && h != dv && x1 - x0 < 64.0f) {
+                        /* the quad is the glyph's advance cell with both edges rounded, so
+                         * the same letter came out 2 px wide here and 3 there, and narrow
+                         * cells (l) squeezed their stems thinner. Every glyph of a text size
+                         * gets the size's one x scale (quad width per texel, averaged over
+                         * what is drawn, then frozen so it holds still), centred on the
+                         * game's quad so the rounding splits between both gaps */
+                        static struct { float h, dv, w, du; int n; } ks[16];
+                        int ki = 0;
+                        while (ki < 16 && ks[ki].n && (ks[ki].h != h || ks[ki].dv != dv)) ki++;
+                        if (ki < 16) {
+                            if (!ks[ki].n) { ks[ki].h = h; ks[ki].dv = dv; }
+                            if (ks[ki].n < 4000) { ks[ki].w += x1 - x0; ks[ki].du += du; ks[ki].n++; }
+                            const float w = du * ks[ki].w / ks[ki].du, m = (x0 + x1) * 0.5f;
+                            x0 = m - w * 0.5f; x1 = m + w * 0.5f;
+                        }
+                    }
+                }
+                const float n0 = a + (x0 - a) * s, r0 = floorf(n0 * g + 0.5f) / g, r1 = r0 + floorf((x1 - x0) * s * g + 0.5f) / g;
+                const float f0 = a + (r0 - a) / s, f1 = a + (r1 - a) / s;   /* put() narrows again */
+                const float y0 = floorf(py * gy + 0.5f) / gy, y1 = y0 + floorf((qy - py) * gy + 0.5f) / gy;   /* rows too (not squeezed: wide screens) */
+                const float fp = pl ? f0 : f1, fq = pl ? f1 : f0;
+                c[0].fx = fp; c[0].fy = y0; c[1].fx = fq; c[1].fy = y0; c[2].fx = fp; c[2].fy = y1; c[3].fx = fq; c[3].fy = y1;
+                for (int k = 0; k < 4; k++) c[k].has_f = 1;
+            }
             float u0 = p->u, v0 = p->v, u1 = q->u, v1 = q->v;
             {   /* PSPRECOMP_UVLOG=<hex tex addr>: print each distinct sprite rect drawn from it */
                 static uint32_t ua = 1; if (ua == 1) { const char *e = getenv("PSPRECOMP_UVLOG"); ua = e ? (uint32_t)strtoul(e, NULL, 16) : 0; }
@@ -1165,6 +1332,22 @@ static void gl_draw(int prim, const psp_vertex *v, int count, const psp_draw_sta
             glBindVertexArray(g_vao);
             g_sv = !vram_tex; g_sv_st = *st; g_sv_fb = g_cur; g_sv_through = g_through;
         }
+        if (g_font_draw) {   /* the font's glyph cache in place of the atlas */
+            static GLuint ft; int fw, fh, y0, y1; const uint32_t *fp = psp_font_cache(&fw, &fh, &y0, &y1);
+            glActiveTexture(GL_TEXTURE0);
+            if (!ft) { glGenTextures(1, &ft); glBindTexture(GL_TEXTURE_2D, ft); glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, fw, fh, 0, GL_RGBA, GL_UNSIGNED_BYTE, fp); y1 = 0; }
+            glBindTexture(GL_TEXTURE_2D, ft);
+            if (fp && y1 > y0) {   /* only the rows new glyphs went into (a whole 16 MB upload stalled the frame) */
+                glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+                LARGE_INTEGER t0, t1, qf; QueryPerformanceCounter(&t0);
+                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, y0, fw, y1 - y0, GL_RGBA, GL_UNSIGNED_BYTE, fp + (size_t)y0 * fw);
+                if (getenv("PSPRECOMP_FONTDBG")) { glFinish(); QueryPerformanceCounter(&t1); QueryPerformanceFrequency(&qf);
+                    fprintf(stderr, "font: upload f%u rows %d-%d %.2f ms\n", (unsigned)g_frame, y0, y1, (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)qf.QuadPart); } }
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            glUniform2f(u_tex_size, (float)fw, (float)fh); glUniform1i(u_ui_up, 0); glUniform1i(u_lod_mode, 0);
+            g_sv = 0;   /* the next draw binds its own texture again */
+        }
         {   /* Back-face culling (BCE/CULL). Rectangles are never culled. Drawn
              * unculled, a model's back faces fight its front ones along folds
              * (the tank's gun boxes against the hull). The framebuffer is
@@ -1248,6 +1431,7 @@ static int g_tr_live_pending;
 /* The shown buffer, 480x272, as 0xAABBGGRR. -1 if that address was never a GL target. */
 static int gl_read_display(uint32_t addr, uint32_t stride, int fmt, uint32_t *out) {
     g_sv = 0;                           /* once a frame: pick up settings changes */
+    { const uint32_t a = (addr & (PSP_VRAM_SIZE - 1)) | PSP_VRAM_BASE; int i = 0; while (i < 4 && g_shown[i] && g_shown[i] != a) i++; if (i < 4 && !g_shown[i]) g_shown[i] = a; }   /* the buffers the game shows */
     (void)stride; (void)fmt;
     if (g_ready != 1) return -1;
     if (!acquire()) return -1;
@@ -1272,6 +1456,18 @@ static int gl_read_display(uint32_t addr, uint32_t stride, int fmt, uint32_t *ou
         glBindFramebuffer(GL_FRAMEBUFFER, g_cur ? g_cur->fbo : 0); fprintf(stderr, "gl: fbdump %d\n", g_nfb); } }
     if (poll) { FILE *mf = fopen("maxdraw.cmd", "rb"); if (mf) { int v; if (fscanf(mf, "%d", &v) == 1) g_maxdraw = v; fclose(mf); remove("maxdraw.cmd"); } }
     if (poll) { FILE *tf = fopen("gltrace.cmd", "rb"); if (tf) { int k = 1; if (fscanf(tf, "%d", &k) != 1 || k < 1) k = 1; fclose(tf); remove("gltrace.cmd"); g_tr_live_pending = k; fprintf(stderr, "gl: live trace frame %u\n", (unsigned)g_frame + 1); } }
+#ifdef PSPRECOMP_DEV
+    {   /* PSPRECOMP_FTLOG=<ms>: log shown frames slower than ms, and a per-second summary */
+        static double thr = -1, last, sec_t, sec_max; static int sec_n, sec_slow; LARGE_INTEGER qc, qf;
+        if (thr < 0) { const char *e = getenv("PSPRECOMP_FTLOG"); thr = e ? atof(e) : 0; }
+        if (thr > 0) { QueryPerformanceCounter(&qc); QueryPerformanceFrequency(&qf); const double t = (double)qc.QuadPart * 1000.0 / (double)qf.QuadPart;
+            if (last > 0) { const double d = t - last; sec_n++; if (d > sec_max) sec_max = d;
+                if (d > thr) { sec_slow++; fprintf(stderr, "ft: frame %u %.1f ms dec %d (vram %d) %.1f ms\n", (unsigned)g_frame, d, g_dec_n, g_dec_vram, g_dec_ms); } }
+            static int sd; static double sdm; sd += g_dec_n; sdm += g_dec_ms;
+            last = t; if (t - sec_t >= 1000.0) { fprintf(stderr, "ft: sec decodes %d %.1f ms\n", sd, sdm); sd = 0; sdm = 0; } if (t - sec_t >= 1000.0) { if (sec_t > 0) fprintf(stderr, "ft: sec %d frames max %.1f ms slow %d\n", sec_n, sec_max, sec_slow); sec_t = t; sec_n = sec_slow = 0; sec_max = 0; } }
+        g_dec_n = g_dec_vram = 0; g_dec_ms = 0;
+    }
+#endif
     g_frame++;          /* textures get re-hashed once per shown frame */ if (getenv("PSPRECOMP_GL_ALL") && g_frame % 100 == 0) fprintf(stderr, "gl: frame %u draws %d\n", (unsigned)g_frame, nd);
     { const char *dr = getenv("PSPRECOMP_DUMP_RAM");   /* <frame>: write ram.bin once */
       if (dr && g_frame == (unsigned)atoi(dr)) { FILE *rf = fopen("ram.bin", "wb"); if (rf) { fwrite(psp_mem.ram, 1, PSP_RAM_SIZE, rf); fclose(rf); } } }
@@ -1294,19 +1490,39 @@ static int gl_read_display(uint32_t addr, uint32_t stride, int fmt, uint32_t *ou
         /* Above 1x: the frame is shrunk on the GPU to the size the window
          * shows it at (linear blit: supersampled), read as BGRA, published
          * for the window, and point-sampled to 480x272 for everything else
-         * (screenshots). A window as big as the render reads it whole. */
+         * (screenshots). A window as big as the render reads it whole; a
+         * bigger one (widescreen) is stretched up here too: GDI HALFTONE at
+         * 3440x1440 cost 20-30 ms a frame. */
         static LARGE_INTEGER t_sum; static int t_n; LARGE_INTEGER t0; QueryPerformanceCounter(&t0);
         const int s = g_scale, RW = 480 * s, RH = 272 * s;
         int OW = RW, OH = RH;
         if (s > 1) {
             int vw, vh; psp_window_view(&vw, &vh);
-            if (vw > 0 && vh > 0 && vw < RW) {
+            if (vw > 0 && vh > 0 && (int64_t)vw * vh <= 480 * 8 * 272 * 8 && (vw != RW || vh != RH)) {   /* also up (widescreen: wider than the render), never on the CPU; by area: it fits big[] (5120x1440 does) */
                 OW = vw; OH = vh;
                 dn_target(OW, OH);
-                glBindFramebuffer(GL_READ_FRAMEBUFFER, f->fbo);
-                glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_dn_fbo);
                 glDisable(GL_SCISSOR_TEST); g_sv = 0;
-                glBlitFramebuffer(0, 0, RW, RH, 0, 0, OW, OH, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+                /* A linear blit reads 2x2 texels per pixel, so shrinking by 2x or more
+                 * skips texels and thin lines (text stems) come out uneven: halve
+                 * first (each halving averages exactly 2x2), then the last step. */
+                static GLuint hf[4], ht[4]; static int hw[4], hh2[4];
+                GLuint src = f->fbo; int sw = RW, sh = RH;
+                for (int i = 0; i < 4 && sw >= OW * 2 && sh >= OH * 2; i++) {
+                    if (!hf[i]) { glGenFramebuffers(1, &hf[i]); glGenTextures(1, &ht[i]); }
+                    if (hw[i] != sw / 2 || hh2[i] != sh / 2) {
+                        hw[i] = sw / 2; hh2[i] = sh / 2;
+                        glBindTexture(GL_TEXTURE_2D, ht[i]);
+                        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, hw[i], hh2[i], 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+                        glBindFramebuffer(GL_FRAMEBUFFER, hf[i]);
+                        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, ht[i], 0);
+                    }
+                    glBindFramebuffer(GL_READ_FRAMEBUFFER, src); glBindFramebuffer(GL_DRAW_FRAMEBUFFER, hf[i]);
+                    glBlitFramebuffer(0, 0, sw, sh, 0, 0, hw[i], hh2[i], GL_COLOR_BUFFER_BIT, GL_LINEAR);
+                    src = hf[i]; sw = hw[i]; sh = hh2[i];
+                }
+                glBindFramebuffer(GL_READ_FRAMEBUFFER, src);
+                glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_dn_fbo);
+                glBlitFramebuffer(0, 0, sw, sh, 0, 0, OW, OH, GL_COLOR_BUFFER_BIT, GL_LINEAR);
                 glBindFramebuffer(GL_FRAMEBUFFER, g_dn_fbo);
             }
         }
@@ -1370,8 +1586,10 @@ static int gl_read_display(uint32_t addr, uint32_t stride, int fmt, uint32_t *ou
         }
         if (async) { glUnmapBuffer(GL_PIXEL_PACK_BUFFER); glBindBuffer(GL_PIXEL_PACK_BUFFER, 0); }
         glBindFramebuffer(GL_FRAMEBUFFER, f->fbo);
+#ifdef PSPRECOMP_DEV
         { LARGE_INTEGER t1, fq; QueryPerformanceCounter(&t1); QueryPerformanceFrequency(&fq); t_sum.QuadPart += t1.QuadPart - t0.QuadPart;
           if (++t_n == 300) { fprintf(stderr, "gl: readback %.3f ms avg (%dx -> %dx%d)\n", (double)t_sum.QuadPart / fq.QuadPart * 1e3 / t_n, s, iw, ih); t_sum.QuadPart = 0; t_n = 0; } }
+#endif
         if (getenv("PSPRECOMP_GL_DEPTHDBG") && g_frame % 100 == 0) {
             float dz[5] = { 0 };
             const int xs[5] = { 240, 60, 420, 240, 240 }, ys[5] = { 136, 136, 136, 30, 240 };
@@ -1380,7 +1598,9 @@ static int gl_read_display(uint32_t addr, uint32_t stride, int fmt, uint32_t *ou
         }
         if (g_cur) glBindFramebuffer(GL_FRAMEBUFFER, g_cur->fbo);
         r = 0;
+#ifdef PSPRECOMP_DEV
         static int nl; if (nl++ % 300 == 0) { uint64_t sum = 0; for (int i = 0; i < 480 * 272; i++) sum += out[i] & 0xFFFFFF; fprintf(stderr, "gl: read %08X sum %llu\n", addr, (unsigned long long)sum); }
+#endif
     } else { static int nm; if (nm++ < 5) fprintf(stderr, "gl: no fb for display %08X\n", addr); }
     if (g_owner == GetCurrentThreadId() && (g_want_ctx || getenv("PSPRECOMP_GL_UNBIND"))) { wglMakeCurrent(NULL, NULL); g_owner = 0; }   /* keep it bound: rebinding each frame cost time */
     release();
